@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 mazda-core = { path = "../../crates/mazda-core" }
 mazda-mock = { path = "../../crates/mazda-mock" }
+mazda-ui = { path = "../../crates/mazda-ui" }
+minifb = "0.28"
 
 [lints]
 workspace = true
