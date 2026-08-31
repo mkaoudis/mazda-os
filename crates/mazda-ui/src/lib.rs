@@ -193,21 +193,21 @@ impl UiModel {
 
     pub fn render(&self, renderer: &mut impl Renderer) {
         renderer.clear(Color::BACKGROUND);
-        self.render_header(renderer);
+        Self::render_header(renderer);
         self.render_navigation(renderer);
 
         match self.screen {
             Screen::NowPlaying => self.render_now_playing(renderer),
             Screen::Drive => self.render_drive(renderer),
             Screen::Phone => {
-                self.render_placeholder(renderer, "PHONE", "Phone integration comes later.")
+                Self::render_placeholder(renderer, "PHONE", "Phone integration comes later.");
             }
             Screen::Settings => {
-                self.render_placeholder(renderer, "SETTINGS", "Desktop simulator / read-only mode")
+                Self::render_placeholder(renderer, "SETTINGS", "Desktop simulator / read-only mode");
             }
         }
 
-        self.render_footer(renderer);
+        Self::render_footer(renderer);
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -224,7 +224,7 @@ impl UiModel {
         self.screen = Screen::ALL[next];
     }
 
-    fn render_header(&self, renderer: &mut impl Renderer) {
+    fn render_header(renderer: &mut impl Renderer) {
         renderer.fill_rect(Rect::new(0, 0, DISPLAY_WIDTH, 64), Color::PANEL);
         renderer.text(24, 21, "MAZDA OS", 2, Color::TEXT);
         renderer.text(600, 24, "DESKTOP SIM", 1, Color::TEXT_MUTED);
@@ -308,12 +308,12 @@ impl UiModel {
         renderer.text(x + 350, y + 23, &temperature, 1, Color::TEXT_MUTED);
     }
 
-    fn render_placeholder(&self, renderer: &mut impl Renderer, title: &str, subtitle: &str) {
+    fn render_placeholder(renderer: &mut impl Renderer, title: &str, subtitle: &str) {
         renderer.text(208, 92, title, 1, Color::ACCENT);
         renderer.text(208, 144, subtitle, 1, Color::TEXT_MUTED);
     }
 
-    fn render_footer(&self, renderer: &mut impl Renderer) {
+    fn render_footer(renderer: &mut impl Renderer) {
         renderer.fill_rect(Rect::new(0, 432, DISPLAY_WIDTH, 48), Color::PANEL);
         renderer.text(
             24,
