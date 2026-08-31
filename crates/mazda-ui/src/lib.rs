@@ -203,7 +203,11 @@ impl UiModel {
                 Self::render_placeholder(renderer, "PHONE", "Phone integration comes later.");
             }
             Screen::Settings => {
-                Self::render_placeholder(renderer, "SETTINGS", "Desktop simulator / read-only mode");
+                Self::render_placeholder(
+                    renderer,
+                    "SETTINGS",
+                    "Desktop simulator / read-only mode",
+                );
             }
         }
 
