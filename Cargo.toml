@@ -1,0 +1,19 @@
+[workspace]
+members = [
+    "apps/desktop",
+    "crates/mazda-core",
+    "crates/mazda-mock",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mkaoudis/mazda-os"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
