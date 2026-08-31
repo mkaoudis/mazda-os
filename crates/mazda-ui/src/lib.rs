@@ -1,9 +1,7 @@
 //! Platform-neutral UI model and rendering primitives for the Mazda Connect display.
 
 use font8x8::{UnicodeFonts, BASIC_FONTS};
-use mazda_core::{
-    CommanderEvent, Gear, MazdaReadOnly, MediaState, PlaybackState, VehicleSnapshot,
-};
+use mazda_core::{CommanderEvent, Gear, MazdaReadOnly, MediaState, PlaybackState, VehicleSnapshot};
 
 pub const DISPLAY_WIDTH: usize = 800;
 pub const DISPLAY_HEIGHT: usize = 480;
@@ -122,12 +120,7 @@ impl Renderer for Framebuffer {
                     for column in 0..8 {
                         if bits & (1_u8 << column) != 0 {
                             self.fill_rect(
-                                Rect::new(
-                                    cursor_x + column * scale,
-                                    y + row * scale,
-                                    scale,
-                                    scale,
-                                ),
+                                Rect::new(cursor_x + column * scale, y + row * scale, scale, scale),
                                 color,
                             );
                         }
@@ -206,7 +199,9 @@ impl UiModel {
         match self.screen {
             Screen::NowPlaying => self.render_now_playing(renderer),
             Screen::Drive => self.render_drive(renderer),
-            Screen::Phone => self.render_placeholder(renderer, "PHONE", "Phone integration comes later."),
+            Screen::Phone => {
+                self.render_placeholder(renderer, "PHONE", "Phone integration comes later.")
+            }
             Screen::Settings => {
                 self.render_placeholder(renderer, "SETTINGS", "Desktop simulator / read-only mode")
             }
@@ -247,7 +242,11 @@ impl UiModel {
             } else {
                 Color::PANEL
             };
-            let text = if active { Color::TEXT } else { Color::TEXT_MUTED };
+            let text = if active {
+                Color::TEXT
+            } else {
+                Color::TEXT_MUTED
+            };
             renderer.fill_rect(Rect::new(12, y, 152, 60), background);
             if active {
                 renderer.fill_rect(Rect::new(12, y, 4, 60), Color::ACCENT);
@@ -284,7 +283,13 @@ impl UiModel {
         renderer.text(208, 132, "VEHICLE STATUS", 2, Color::TEXT);
         self.render_vehicle_card(renderer, 208, 208);
         renderer.text(208, 336, "READ-ONLY DATA PATH", 1, Color::TEXT_MUTED);
-        renderer.text(208, 360, "No vehicle-control capability is exposed.", 1, Color::TEXT_MUTED);
+        renderer.text(
+            208,
+            360,
+            "No vehicle-control capability is exposed.",
+            1,
+            Color::TEXT_MUTED,
+        );
     }
 
     fn render_vehicle_card(&self, renderer: &mut impl Renderer, x: usize, y: usize) {
@@ -293,7 +298,13 @@ impl UiModel {
         let speed = format!("{:.0} KM/H", self.vehicle.speed.get());
         let temperature = format!("{:.0} C", self.vehicle.outside_temperature.get());
         renderer.text(x + 20, y + 20, &speed, 2, Color::TEXT);
-        renderer.text(x + 210, y + 23, gear_label(self.vehicle.gear), 1, Color::TEXT_MUTED);
+        renderer.text(
+            x + 210,
+            y + 23,
+            gear_label(self.vehicle.gear),
+            1,
+            Color::TEXT_MUTED,
+        );
         renderer.text(x + 350, y + 23, &temperature, 1, Color::TEXT_MUTED);
     }
 
