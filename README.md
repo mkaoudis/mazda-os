@@ -30,6 +30,7 @@ The first CMU integration is observational. Any future mutating infotainment ope
 
 ```text
 apps/
+  cmu-inspect/    allowlisted, stdout-only CMU metadata collector
   desktop/       800×480 desktop simulator
 crates/
   mazda-core/    domain types and read-only capability boundary
@@ -67,6 +68,10 @@ cargo test --workspace --locked
 ## Hardware development
 
 Use a spare CMU on a bench before touching the daily-driver unit. See [`docs/BENCH_SETUP.md`](docs/BENCH_SETUP.md).
+
+The first inspection utility can be carried on a USB mass-storage device, but the center-console
+port is not a laptop management port. Read [`docs/CMU_USB_INSPECTION.md`](docs/CMU_USB_INSPECTION.md)
+before building or connecting anything.
 
 No code in this repository should yet be assumed safe for installation in a vehicle.
 

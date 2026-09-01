@@ -39,3 +39,7 @@ Before installing project code, record:
 - relevant input devices.
 
 Prefer observation and filesystem copies over modification. Do not flash the VIP, bootloader, kernel, or daily-driver CMU during characterization.
+
+The allowlisted collector in `apps/cmu-inspect` covers this first pass without executing shell
+commands or writing CMU storage. Follow [`CMU_USB_INSPECTION.md`](CMU_USB_INSPECTION.md); do not
+assume that the USB port alone provides a console or automatic execution path.
