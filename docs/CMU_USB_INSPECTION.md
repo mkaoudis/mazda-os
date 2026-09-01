@@ -24,7 +24,9 @@ The collector is restricted to the Linux application processor. It does not invo
 open CAN or LIN devices, call vehicle-data APIs, flash firmware, remount filesystems, install
 persistence, configure networking, load modules, change services, or reboot. It reads a fixed list
 of files under `/jci`, `/proc`, `/sys`, and the running kernel's USB-network module directory. Its
-only intentional writes are a new bounded report directory on the removable USB drive.
+only intentional writes are a bounded temporary firmware-gate copy and a new bounded report
+directory, both on the removable USB drive. The gate copy is verified absent before report
+creation or an unsupported-identity exit.
 
 This boundary is structural: the Mac utility exposes no arbitrary command, collector path, mount,
 or shell option. Future VIP, CAN, and LIN functionality is out of scope.
