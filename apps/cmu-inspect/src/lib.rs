@@ -713,15 +713,9 @@ struct FirmwareIdentity<'a> {
 
 impl<'a> FirmwareIdentity<'a> {
     fn parse(version_file: &'a str) -> Option<Self> {
-        let version = unique_quoted_ini_value(version_file, "JCI_SW_VER")?
-            .rsplit('_')
-            .next()?
-            .to_ascii_uppercase();
+        let version = unique_quoted_ini_value(version_file, "JCI_SW_VER")?.to_ascii_uppercase();
         let patch = unique_quoted_ini_value(version_file, "JCI_SW_VER_PATCH")?.to_ascii_uppercase();
-        let flavor = unique_quoted_ini_value(version_file, "JCI_SW_FLAVOR")?
-            .rsplit('_')
-            .next()?
-            .to_ascii_uppercase();
+        let flavor = unique_quoted_ini_value(version_file, "JCI_SW_FLAVOR")?.to_ascii_uppercase();
         let software_part_number = unique_quoted_ini_value(version_file, "JCI_SW_PART_NUMBER")?;
 
         Some(Self {
@@ -733,14 +727,18 @@ impl<'a> FirmwareIdentity<'a> {
     }
 
     fn is_supported(&self) -> bool {
-        matches!(self.version.as_str(), "70.00.100" | "70.00.100A")
+        self.version == "MAZ_CMU-150_70.00.100"
             && self.patch == "A"
             && self.flavor == "NA"
             && self.software_part_number == SUPPORTED_SOFTWARE_PART_NUMBER
     }
 
     fn normalized_firmware(&self) -> String {
-        let mut version = self.version.clone();
+        let mut version = self
+            .version
+            .strip_prefix("MAZ_CMU-150_")
+            .unwrap_or(&self.version)
+            .to_owned();
         if !self.patch.is_empty() && !version.ends_with(&self.patch) {
             version.push_str(&self.patch);
         }
@@ -934,7 +932,7 @@ mod tests {
 
     const TARGET_VERSION_INI: &[u8] = b"JCI_SW_VER=\"MAZ_CMU-150_70.00.100\"\r\n\
 JCI_SW_VER_PATCH=\"A\"\r\n\
-JCI_SW_FLAVOR=\"MAZ140_NA\"\r\n\
+JCI_SW_FLAVOR=\"NA\"\r\n\
 JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
 
     struct TestDirectory(PathBuf);
@@ -1085,23 +1083,25 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         assert!(identity.is_supported());
         assert_eq!(identity.normalized_firmware(), SUPPORTED_FIRMWARE);
 
-        let embedded_patch = std::str::from_utf8(TARGET_VERSION_INI)
-            .expect("fixture is UTF-8")
-            .replace("_70.00.100\"", "_70.00.100A\"");
-        assert!(FirmwareIdentity::parse(&embedded_patch)
-            .expect("parse embedded patch identity")
-            .is_supported());
-
         for rejected in [
             std::str::from_utf8(TARGET_VERSION_INI)
                 .expect("fixture is UTF-8")
-                .replace("MAZ140_NA", "MAZ140_EU"),
+                .replace("JCI_SW_FLAVOR=\"NA\"", "JCI_SW_FLAVOR=\"EU\""),
             std::str::from_utf8(TARGET_VERSION_INI)
                 .expect("fixture is UTF-8")
                 .replace("SWI10-24818-807R02", "SWI10-24818-003R02"),
             std::str::from_utf8(TARGET_VERSION_INI)
                 .expect("fixture is UTF-8")
                 .replace("JCI_SW_VER_PATCH=\"A\"", "JCI_SW_VER_PATCH=\"B\""),
+            std::str::from_utf8(TARGET_VERSION_INI)
+                .expect("fixture is UTF-8")
+                .replace("MAZ_CMU-150_70.00.100", "NOT_THE_TARGET_70.00.100"),
+            std::str::from_utf8(TARGET_VERSION_INI)
+                .expect("fixture is UTF-8")
+                .replace("JCI_SW_FLAVOR=\"NA\"", "JCI_SW_FLAVOR=\"UNRELATED_NA\""),
+            std::str::from_utf8(TARGET_VERSION_INI)
+                .expect("fixture is UTF-8")
+                .replace("_70.00.100\"", "_70.00.100A\""),
         ] {
             assert!(!FirmwareIdentity::parse(&rejected)
                 .expect("parse non-target identity")
@@ -1109,7 +1109,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         }
 
         let duplicate = format!(
-            "{}JCI_SW_FLAVOR=\"MAZ140_NA\"\n",
+            "{}JCI_SW_FLAVOR=\"NA\"\n",
             std::str::from_utf8(TARGET_VERSION_INI).expect("fixture is UTF-8")
         );
         assert!(FirmwareIdentity::parse(&duplicate).is_none());
@@ -1198,7 +1198,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             "jci/version.ini",
             b"JCI_SW_VER=\"MAZ_CMU-150_74.00.324\"\n\
 JCI_SW_VER_PATCH=\"A\"\n\
-JCI_SW_FLAVOR=\"MAZ140_NA\"\n\
+JCI_SW_FLAVOR=\"NA\"\n\
 JCI_SW_PART_NUMBER=\"SWI10-26479-118R02\"\n",
         );
 
@@ -1224,7 +1224,7 @@ JCI_SW_PART_NUMBER=\"SWI10-26479-118R02\"\n",
             "jci/version.ini",
             b"JCI_SW_VER=\"MAZ_CMU-150_70.00.100\"\n\
 JCI_SW_VER_PATCH=\"B\"\n\
-JCI_SW_FLAVOR=\"MAZ140_NA\"\n\
+JCI_SW_FLAVOR=\"NA\"\n\
 JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
         );
 
@@ -1242,13 +1242,28 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
 
     #[test]
     #[cfg(target_os = "linux")]
-    fn collector_refuses_wrong_region_or_software_part_without_creating_report() {
+    fn collector_refuses_inexact_identity_metadata_without_creating_report() {
         let target = std::str::from_utf8(TARGET_VERSION_INI).expect("fixture is UTF-8");
         for (label, version_ini) in [
-            ("wrong-region", target.replace("MAZ140_NA", "MAZ140_EU")),
+            (
+                "wrong-region",
+                target.replace("JCI_SW_FLAVOR=\"NA\"", "JCI_SW_FLAVOR=\"EU\""),
+            ),
             (
                 "wrong-part",
                 target.replace("SWI10-24818-807R02", "SWI10-24818-003R02"),
+            ),
+            (
+                "wrong-version-prefix",
+                target.replace("MAZ_CMU-150_70.00.100", "NOT_THE_TARGET_70.00.100"),
+            ),
+            (
+                "wrong-flavor-prefix",
+                target.replace("JCI_SW_FLAVOR=\"NA\"", "JCI_SW_FLAVOR=\"UNRELATED_NA\""),
+            ),
+            (
+                "embedded-patch",
+                target.replace("_70.00.100\"", "_70.00.100A\""),
             ),
         ] {
             let usb = TestDirectory::new(label);

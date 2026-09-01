@@ -10,7 +10,7 @@ Primary sources and useful community work for Mazda Connect Gen 6 / 6.5 research
 | v59 < 59.00.502 | Still compatible with the older AIO access model. |
 | v59.00.502+ | Important lock-down boundary; later AIO workflows generally require serial access or previously installed recovery/autorun support. |
 | v70.00.000 / .021+ | CarPlay / Android Auto era. |
-| v70.00.100A NA | Current single-car target: the owner's 2019.5 CX-5 GT displays `70.00.100 NA N`; published component metadata lists software part `SWI10-24818-807R02`. |
+| v70.00.100A NA | Current single-car target: the owner's 2019.5 CX-5 GT displays `70.00.100 NA N`; published component metadata lists raw version `MAZ_CMU-150_70.00.100`, patch `A`, flavor `NA`, and software part `SWI10-24818-807R02`. |
 | v70.00.335+ | Additional lock-down; legacy autorun-based access is removed and serial-assisted methods become more important. |
 | v74.00.324A | ZDI's exact research target and a useful architectural reference, but not a production target for this project. |
 | v74.00.331 | Community-reported on some replacement CMUs; do not target unless encountered on hardware. |
@@ -44,7 +44,7 @@ Primary sources and useful community work for Mazda Connect Gen 6 / 6.5 research
 
 ## Working assumptions for mazda-os
 
-- Treat the owner's **2019.5 CX-5 GT on `70.00.100 NA N`** as the only production target. The corresponding internal gate is `70.00.100A-NA` plus software part `SWI10-24818-807R02`.
+- Treat the owner's **2019.5 CX-5 GT on `70.00.100 NA N`** as the only production target. The internal gate requires the complete raw version `MAZ_CMU-150_70.00.100`, patch `A`, flavor `NA`, and software part `SWI10-24818-807R02`.
 - Treat ZDI's update-filename injection on this exact v70 build as unconfirmed until the target car returns a valid report; ZDI's published exact test target was `74.00.324A`.
 - Firmware lock-down primarily changes how privileged execution is obtained; once access is available, the CMU remains a conventional embedded Linux application platform.
 - Keep all project code on the application-processor side. Do not depend on VIP flashing, raw vehicle-bus access, or vehicle-control capabilities.

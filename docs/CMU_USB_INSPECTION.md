@@ -5,12 +5,15 @@
 - 2019.5 Mazda CX-5 GT;
 - About-screen version `70.00.100 NA N`;
 - internal firmware identity `70.00.100A-NA`;
+- raw version fields `JCI_SW_VER="MAZ_CMU-150_70.00.100"`,
+  `JCI_SW_VER_PATCH="A"`, and `JCI_SW_FLAVOR="NA"`;
 - software part number `SWI10-24818-807R02`.
 
 This is not a general Mazda utility. The model and trim are a required owner confirmation; the
 collector cannot verify them without querying vehicle-side services, which are intentionally out of
-scope. Once launched, it independently requires the exact firmware version, patch, North American
-flavor, and software part number before creating a report.
+scope. Once launched, it independently requires the complete published raw version, patch, flavor,
+and software part fields before creating a report. Prefixes are not discarded or normalized for
+the gate.
 
 The final `N` on the screen is the navigation protocol marker. It is not the firmware patch. The
 patch is the `A` in Mazda's package identity `cmu150_NA_70.00.100A`. Mazda's North American service
@@ -155,7 +158,8 @@ cargo run --locked -p mazda-cmu-inspect -- \
 The analyzer is read-only. It rejects a missing or incorrect completion marker, missing or
 duplicate rows, unknown statuses, any timeout or I/O error, wrong sizes or checksums, unexpected
 files, symlinks, captures over 1 MiB, the wrong build ID, module paths from another kernel, or any
-firmware metadata other than `70.00.100A-NA` and software part `SWI10-24818-807R02`.
+firmware metadata other than raw version `MAZ_CMU-150_70.00.100`, patch `A`, flavor `NA`, and
+software part `SWI10-24818-807R02`.
 
 Allowed nonfatal capture statuses are `not_found`, `not_regular_file`, `permission_denied`, and
 `dependency_failed`. Missing evidence is never a reason to elevate privileges or broaden the

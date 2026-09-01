@@ -61,7 +61,7 @@ while IFS= read -r version_line; do
                 \"*\") value=${value#\"}; value=${value%\"} ;;
                 *) exit 67 ;;
             esac
-            FIRMWARE_VERSION=${value##*_}
+            FIRMWARE_VERSION=$value
             ;;
         JCI_SW_VER_PATCH=*)
             [ "$SEEN_SW_VER_PATCH" -eq 0 ] || exit 67
@@ -81,7 +81,7 @@ while IFS= read -r version_line; do
                 \"*\") value=${value#\"}; value=${value%\"} ;;
                 *) exit 67 ;;
             esac
-            FIRMWARE_FLAVOR=${value##*_}
+            FIRMWARE_FLAVOR=$value
             ;;
         JCI_SW_PART_NUMBER=*)
             [ "$SEEN_SW_PART_NUMBER" -eq 0 ] || exit 67
@@ -97,7 +97,7 @@ while IFS= read -r version_line; do
 done <"$VERSION_PATH"
 
 case "$SEEN_SW_VER:$SEEN_SW_VER_PATCH:$SEEN_SW_FLAVOR:$SEEN_SW_PART_NUMBER:$FIRMWARE_VERSION:$FIRMWARE_PATCH:$FIRMWARE_FLAVOR:$SOFTWARE_PART_NUMBER" in
-    1:1:1:1:70.00.100:A:NA:SWI10-24818-807R02|1:1:1:1:70.00.100A:A:NA:SWI10-24818-807R02) ;;
+    1:1:1:1:MAZ_CMU-150_70.00.100:A:NA:SWI10-24818-807R02) ;;
     *) exit 67 ;;
 esac
 
