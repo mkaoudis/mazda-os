@@ -13,10 +13,14 @@ Use a spare Gen 6.5 CMU before touching the daily-driver unit.
 
 Initially connect only CMU power, ACC, ground, display, and UART. Leave every connection to the **vehicle** buses physically absent.
 
+Verify the connector pinout for the exact CMU before applying power. Connect the bench supply's positive output through the fuse to B+ and ACC, and connect its negative output directly to CMU ground.
+
 ```text
 laptop ── USB/UART ── CMU ── display
-                       │
-bench PSU ── 5 A fuse ─┴─ B+ / ACC / ground
+
+bench PSU + ── 5 A fuse ──┬── CMU B+
+                          └── CMU ACC
+bench PSU - ───────────────── CMU ground
 
 vehicle CAN/LIN ── disconnected
 ```
