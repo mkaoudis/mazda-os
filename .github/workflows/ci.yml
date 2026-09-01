@@ -21,6 +21,22 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      - name: Fetch pinned BusyBox 1.19 fixture
+        run: |
+          curl --fail --silent --show-error --location \
+            https://busybox.net/downloads/binaries/1.19.0/busybox-x86_64 \
+            --output "${{ runner.temp }}/busybox-1.19.0-x86_64"
+          echo "0d8564c5a85b0976eeed24afc99894e1b2a1d21d54bb5cb673c33f72b3743f8c  ${{ runner.temp }}/busybox-1.19.0-x86_64" \
+            | sha256sum --check --strict
+          chmod 755 "${{ runner.temp }}/busybox-1.19.0-x86_64"
+      - name: Test CMU production shell path with BusyBox 1.19
+        env:
+          MAZDA_CMU_INSPECT_BUSYBOX_1_19: ${{ runner.temp }}/busybox-1.19.0-x86_64
+          MAZDA_CMU_INSPECT_USE_SUDO_CHROOT: "1"
+        run: >-
+          cargo test --locked -p mazda-cmu-inspect
+          tests::busybox_1_19_production_fixture_exercises_launcher_and_timeout
+          -- --exact --nocapture
 
   macos-cmu-inspect:
     runs-on: macos-latest

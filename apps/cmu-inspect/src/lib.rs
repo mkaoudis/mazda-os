@@ -1192,7 +1192,11 @@ fn validate_macos_volume_plists(
 #[cfg(test)]
 mod tests {
     #[cfg(target_os = "linux")]
+    use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+    #[cfg(target_os = "linux")]
     use std::process::Command;
+    #[cfg(target_os = "linux")]
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -1241,6 +1245,28 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         fn drop(&mut self) {
             fs::remove_dir_all(&self.0).expect("remove test directory");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn run_in_fixture_chroot(root: &Path, arguments: &[&str]) -> std::process::Output {
+        let use_sudo = std::env::var_os("MAZDA_CMU_INSPECT_USE_SUDO_CHROOT").is_some();
+        let mut command = if use_sudo {
+            let metadata = fs::metadata(root).expect("inspect chroot owner");
+            let userspec = format!("{}:{}", metadata.uid(), metadata.gid());
+            let mut command = Command::new("sudo");
+            command.args(["-n", "chroot"]);
+            command.arg(format!("--userspec={userspec}"));
+            command
+        } else {
+            let mut command = Command::new("unshare");
+            command.args(["--user", "--map-root-user", "--mount", "chroot"]);
+            command
+        };
+        command
+            .arg(root)
+            .args(arguments)
+            .output()
+            .expect("run command in fixture chroot")
     }
 
     #[test]
@@ -1520,6 +1546,92 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         assert!(applet_validation < bounded_gate);
         assert!(bounded_gate < parse_gate);
         assert!(!collector.contains("done <\"$VERSION_PATH\""));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn busybox_1_19_production_fixture_exercises_launcher_and_timeout() {
+        let Some(busybox_source) = std::env::var_os("MAZDA_CMU_INSPECT_BUSYBOX_1_19") else {
+            return;
+        };
+        let version = Command::new(&busybox_source)
+            .output()
+            .expect("run pinned BusyBox fixture");
+        let version_text = String::from_utf8_lossy(&version.stdout);
+        assert!(version_text.contains("BusyBox v1.19.0"));
+
+        let fixture = TestDirectory::new("busybox-1.19-chroot");
+        for directory in ["bin", "dev", "jci", "root", "tmp/mnt/sda1"] {
+            fs::create_dir_all(fixture.0.join(directory)).expect("create chroot directory");
+        }
+        let busybox = fixture.0.join("bin/busybox");
+        fs::copy(&busybox_source, &busybox).expect("copy pinned BusyBox into chroot");
+        fs::set_permissions(&busybox, fs::Permissions::from_mode(0o755))
+            .expect("make pinned BusyBox executable");
+        for applet in ["mkdir", "mv", "rm", "sh", "sync"] {
+            symlink("busybox", fixture.0.join("bin").join(applet))
+                .expect("install BusyBox applet link");
+        }
+        fs::write(fixture.0.join("dev/null"), b"").expect("create fixture null file");
+        fs::write(fixture.0.join("jci/version.ini"), TARGET_VERSION_INI)
+            .expect("write firmware fixture");
+        let usb_root = fixture.0.join("tmp/mnt/sda1");
+        fs::write(usb_root.join(COLLECTOR_FILE_NAME), COLLECTOR)
+            .expect("write production collector path");
+        fs::write(usb_root.join(UPDATE_FLAG_FILE_NAME), b"\n").expect("write update marker");
+        let launcher = launcher_file_name();
+        fs::write(usb_root.join(&launcher), b"\n").expect("write launcher fixture");
+
+        let launcher_command =
+            format!("HOME=/root; export HOME; PATH=/bin; export PATH; printf '%s\\n' {launcher}");
+        let launcher_output = run_in_fixture_chroot(
+            &fixture.0,
+            &["/bin/busybox", "ash", "-c", &launcher_command],
+        );
+        assert!(
+            launcher_output.status.success(),
+            "launcher chain failed: {}",
+            String::from_utf8_lossy(&launcher_output.stderr)
+        );
+        assert_eq!(launcher_output.stdout, b".up\n");
+        let manifest_output = run_in_fixture_chroot(
+            &fixture.0,
+            &[
+                "/bin/busybox",
+                "cat",
+                "/tmp/mnt/sda1/mazda-cmu-report/manifest.tsv",
+            ],
+        );
+        assert!(manifest_output.status.success());
+        let manifest = String::from_utf8(manifest_output.stdout).expect("manifest is UTF-8");
+        assert!(manifest.ends_with("result\tcomplete\n"));
+        let sync_marker_output = run_in_fixture_chroot(
+            &fixture.0,
+            &[
+                "/bin/busybox",
+                "cat",
+                "/tmp/mnt/sda1/mazda-cmu-report/sync-complete",
+            ],
+        );
+        assert!(sync_marker_output.status.success());
+        assert_eq!(
+            sync_marker_output.stdout,
+            format!("{REPORT_BUILD_ID}\n").as_bytes()
+        );
+
+        let timeout_started = std::time::Instant::now();
+        let timeout_output = run_in_fixture_chroot(
+            &fixture.0,
+            &[
+                "/bin/busybox",
+                "ash",
+                "-c",
+                "/bin/busybox timeout -t 1 -s KILL /bin/busybox sleep 5; timeout_status=$?; printf '%s\\n' \"$timeout_status\"",
+            ],
+        );
+        assert!(timeout_output.status.success());
+        assert_eq!(timeout_output.stdout, b"137\n");
+        assert!(timeout_started.elapsed() < Duration::from_secs(4));
     }
 
     #[test]

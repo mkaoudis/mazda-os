@@ -183,6 +183,18 @@ payload.
 Report content is sensitive. Review and redact hostnames, mount paths, and network details before
 publishing it.
 
+## CI and hardware-validation boundary
+
+Linux CI downloads the official static BusyBox 1.19.0 x86-64 binary by a pinned URL and SHA-256,
+then runs the collector in a minimal chroot at its production path. That fixture exercises the
+production `/bin/busybox` applet calls, both `/bin/sync` calls, the exact launcher expansion under
+BusyBox `ash`, and a command that is genuinely killed by `timeout -t 1 -s KILL`. Host-shell tests
+remain separate.
+
+The v70 update-scanner trigger itself is explicitly **hardware-unvalidated**. CI does not emulate
+the stock Mazda scanner, FAT filename handling, USB enumeration, or root execution on
+`70.00.100 NA N`; only a report returned by the owner's exact CMU can validate that boundary.
+
 ## Remote transport remains disabled
 
 No direct Mac transport, USB-Ethernet probe, or remote shell is implemented. A report may show an
