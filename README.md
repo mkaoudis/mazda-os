@@ -69,9 +69,10 @@ cargo test --workspace --locked
 
 Use a spare CMU on a bench before touching the daily-driver unit. See [`docs/BENCH_SETUP.md`](docs/BENCH_SETUP.md).
 
-The first inspection utility can be carried on a USB mass-storage device, but the center-console
-port is not a laptop management port. Read [`docs/CMU_USB_INSPECTION.md`](docs/CMU_USB_INSPECTION.md)
-before building or connecting anything.
+The first inspection utility prepares a firmware-gated, report-only USB payload for an isolated
+Gen-6.5 bench CMU. A passive Mac-to-CMU cable is not supported because both ports are USB hosts.
+Read [`docs/CMU_USB_INSPECTION.md`](docs/CMU_USB_INSPECTION.md) before building or connecting
+anything.
 
 No code in this repository should yet be assumed safe for installation in a vehicle.
 

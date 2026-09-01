@@ -29,7 +29,7 @@ Primary sources and useful community work for Mazda Connect Gen 6 / 6.5 research
 - [Mazda AIO Tweaks](https://mazdatweaks.com/) — canonical legacy tweak project; especially useful for firmware compatibility boundaries and examples of custom UI/apps running on the stock CMU.
 - [mzd-evo/mzd-connect-1-root](https://github.com/mzd-evo/mzd-connect-1-root) — modern root/access research used by later Gen-6 projects.
 - [shunceyb/mzd74-tweaks-no-touch](https://github.com/shunceyb/mzd74-tweaks-no-touch) — v74-specific tweak/root work demonstrating that later firmware remains modifiable.
-- [Miatafy/TouchTune](https://github.com/Miatafy/TouchTune) — current v74.00.324A USB-install work; useful evidence for a non-invasive USB entry path on the main target firmware.
+- [Miatafy/TouchTune](https://github.com/Miatafy/TouchTune) — current v74.00.324A USB-install work; useful evidence for a no-disassembly USB entry path on the main target firmware. The path still executes code as root and TouchTune itself makes persistent changes.
 
 ## Native application and UI development
 

@@ -40,6 +40,7 @@ Before installing project code, record:
 
 Prefer observation and filesystem copies over modification. Do not flash the VIP, bootloader, kernel, or daily-driver CMU during characterization.
 
-The allowlisted collector in `apps/cmu-inspect` covers this first pass without executing shell
-commands or writing CMU storage. Follow [`CMU_USB_INSPECTION.md`](CMU_USB_INSPECTION.md); do not
-assume that the USB port alone provides a console or automatic execution path.
+The firmware-gated collector in `apps/cmu-inspect` covers part of this first pass. It uses a
+published v74 update-scanner command injection to run a fixed shell payload and therefore is not a
+passive USB read. Follow [`CMU_USB_INSPECTION.md`](CMU_USB_INSPECTION.md) and preserve its stricter
+firmware, removable-media, and application-processor-only boundaries.

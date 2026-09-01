@@ -5,7 +5,7 @@
 - Read-only platform capability boundary and deterministic mock backend.
 - 800×480 desktop simulator with Commander input.
 - Platform-neutral UI and renderer abstraction.
-- Allowlisted, stdout-only CMU inspection collector for isolated bench use.
+- Firmware-gated, report-only CMU USB payload preparer with off-target tests.
 - CI: formatting, strict Clippy, and workspace tests.
 
 ## Next — bench CMU characterization

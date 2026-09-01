@@ -1,119 +1,125 @@
-# Read-only CMU inspection over USB media
+# Firmware-gated CMU USB inspection
 
-`mazda-cmu-inspect` collects an allowlisted snapshot of Linux metadata from a first-generation
-Mazda Connect CMU. It is intended for a spare, bus-disconnected bench CMU. The utility reads only;
-it sends its report to standard output and has no code for mounting filesystems, running commands,
-changing privileges, opening vehicle buses, or writing files.
+`mazda-cmu-inspect` prepares a report-only USB payload for a first-generation Mazda Connect CMU.
+The current implementation is deliberately limited to the `74.00.324` / `74.00.324A` firmware
+family. It is an application-processor characterization tool, not a vehicle interface.
 
-## What the armrest port can and cannot do
+The payload never calls VIP tools, opens CAN or LIN interfaces, changes vehicle services, flashes
+firmware, remounts filesystems, installs persistence, configures networking, loads modules, or
+reboots the CMU. It reads a fixed allowlist and writes a bounded report to the same removable USB
+filesystem from which it launched.
 
-The Mazda Connect USB port is the host in its documented USB-media and Android Auto uses. A normal
-laptop USB port is also a host. Connecting those two host ports does not expose the CMU as a USB
-device and must not be attempted with a passive host-to-host cable.
+## What mechanism this uses
 
-The utility therefore uses the port only as removable-media transport:
+The armrest USB ports are host-side ports. A normal MacBook USB port is also a host, so a passive
+host-to-host cable cannot expose the CMU and must not be used.
 
-```text
-build machine ──copies binary──▶ FAT32 USB storage
-                                      │
-                                      ▼
-isolated CMU ──reads binary from── armrest USB port
-       │
-       └── report leaves on the existing console's stdout
-           or through shell redirection to the same USB storage
-```
+For firmware `74.00.324A`, the initial report instead uses the update-scanner command-injection path
+documented by Zero Day Initiative. A FAT32 mass-storage device contains:
 
-The stock CMU does not acquire a console or start this binary merely because the drive is inserted.
-An already-established, explicitly authorized console is required. On the first bench pass, use the
-UART setup in [`BENCH_SETUP.md`](BENCH_SETUP.md). This project does not provide or depend on an
-autorun exploit, firmware updater, Android Auto impersonation, or host-to-host USB bridge.
+- `jci-autoupdate`, which asks the stock scanner to inspect update files;
+- an otherwise empty `.up` file whose filename invokes only `cmu-inspect.sh`;
+- `cmu-inspect.sh`, the fixed report collector.
 
-Mazda documents the console USB port as accepting phones and FAT32 USB media. Android's USB
-documentation separately describes Android Auto's relevant topology: the accessory/head unit is
-the USB host and the Android handset is the device. These are transport facts, not evidence of a
-general-purpose CMU management protocol:
+This is root command execution in the CMU's Linux application processor, even though the invoked
+payload is report-only. The distinction matters: the collector makes no explicit persistent CMU
+write, but the stock update scanner is outside this project's control. Reads can also update access
+times on writable filesystems, and stock logging may record scanner activity. Do not describe the
+whole mechanism as zero-write or risk-free.
 
-- [Mazda Connect USB documentation](https://www.mazdausa.com/static/manuals/mazdaconnect-6gb/contents/48020100.html)
-- [Android USB host and accessory overview](https://developer.android.com/develop/connectivity/usb)
+The launcher is derived from the vulnerability mechanics described by ZDI, not from a firmware
+update package. No signed or unsigned Mazda update image is included, parsed, or installed.
 
-## Report contents
+Primary references:
 
-The JSON report has schema version `1`. Each observation has a fixed source name, a status, and
-either captured content or `null`. The collector reads at most 256 KiB from any individual source.
-Missing and permission-protected sources are reported rather than treated as fatal errors.
+- [ZDI analysis of the v74.00.324A USB command injection](https://www.zerodayinitiative.com/blog/2024/11/7/multiple-vulnerabilities-in-the-mazda-in-vehicle-infotainment-ivi-system)
+- [Mazda Connect USB-media documentation](https://www.mazdausa.com/static/manuals/mazdaconnect-6gb/contents/48020100.html)
+- [Published CMU kernel configuration](https://github.com/silverchris/mazda-cmu-documentation/blob/gh-pages/kernel-config.md)
+- [TouchTune's independently validated v74 USB workflow](https://github.com/Miatafy/TouchTune)
 
-The fixed file allowlist covers:
+## Phase 1: prepare a report drive on macOS
 
-- kernel version and boot arguments;
-- CPU and memory information;
-- mounted filesystems and loaded kernel modules;
-- Linux input-device inventory;
-- OS release and issue text;
-- framebuffer and DRM device metadata.
+First check the CMU version using Mazda Connect's **Settings → System → About** screen. Stop unless
+it shows the `74.00.324` build family. The About screen can omit the trailing package `A`; the
+internal collector accepts only the exact `74.00.324` or `74.00.324A` base after launch.
 
-It also enumerates numeric `/proc` entries and reads only each process's `comm` name. It does not
-collect process arguments or environments. No arbitrary path option is exposed by the executable.
+Use Disk Utility to prepare a dedicated, blank drive with an MBR partition map and FAT32 filesystem.
+Confirm its volume path carefully. The preparer refuses a filesystem root, symlink, missing path,
+non-directory, unconfirmed firmware, or destination containing anything other than standard macOS
+volume metadata. It creates only new files and never overwrites existing content.
 
-## Build
-
-First confirm the processor ABI, dynamic loader, and C library on the exact spare CMU. Do not infer
-them from a model year or part number. Then install an appropriate Rust target on the build machine
-and build with that confirmed target:
+From the repository:
 
 ```bash
-rustup target add <confirmed-target>
-cargo build --release --locked --target <confirmed-target> -p mazda-cmu-inspect
+cargo run --locked -p mazda-cmu-inspect -- \
+  prepare-usb --firmware 74.00.324A /Volumes/MAZDA_CMU
 ```
 
-The resulting binary is
-`target/<confirmed-target>/release/mazda-cmu-inspect`. Copy it to a clean FAT32 USB device using the
-build machine. If the CMU's removable-media mount is `noexec`, or the binary reports an incompatible
-loader or ABI, stop. Do not remount the filesystem, copy the binary onto CMU storage, or change the
-CMU configuration during this characterization pass.
+The command creates exactly three payload files. Inspect the drive in Finder, eject it normally,
+and do not rename or edit the unusual `.up` filename. macOS `._*` AppleDouble sidecars or unrelated
+`.up` files must not be present.
 
-## Bench run
+## Phase 1: isolated bench run
 
-Before inserting the USB device:
+Before inserting the drive:
 
-1. Use a spare CMU, not the daily-driver unit.
+1. Use a spare Gen-6.5 CMU, not the daily-driver unit.
 2. Physically disconnect vehicle CAN and LIN.
 3. Use current-limited, fused bench power as described in [`BENCH_SETUP.md`](BENCH_SETUP.md).
-4. Establish the read-only UART console and identify the existing USB mount path.
-5. Confirm the USB filesystem is mounted without changing its mount state or options.
+4. Confirm `74.00.324` on the CMU screen again.
+5. Confirm the USB drive contains no firmware package, installer, tweak, or unrelated `.up` file.
 
-Invoke the binary directly from its existing USB mount. Capturing stdout in the UART terminal is the
-strictest read-only workflow:
+Insert the drive only after the stock HMI has fully booted. The collector is intentionally silent: it
+does not kill or open HMI dialogs. Allow the scanner to finish and the drive activity to stop before
+turning the bench supply off normally and removing the drive. Never remove it during activity.
 
-```bash
-<existing-usb-mount>/mazda-cmu-inspect
-```
+A successful run creates `mazda-cmu-report/manifest.tsv` on the drive. The manifest is written first
+and ends with `result<TAB>complete` only after every observation was attempted. Treat a missing final
+record as an incomplete run; do not retry repeatedly or try a different exploit. After writing the
+final record, the production payload calls the stock `/bin/sync` once to flush the USB report. That
+also flushes any writes already pending elsewhere in the stock system, another reason not to claim
+the overall mechanism is zero-write. Return to source review and bench diagnosis.
 
-If a file is needed and the shell permits writing the removable device, redirect stdout back to that
-same USB filesystem:
+The report contains:
 
-```bash
-<existing-usb-mount>/mazda-cmu-inspect > <existing-usb-mount>/cmu-report.json
-```
+- exact CMU and kernel version data;
+- CPU, memory, partition, mount, and filesystem summaries;
+- loaded modules and the published kernel configuration when exposed by `/proc`;
+- input, framebuffer, DRM, USB, and network-interface inventories;
+- process names and existing interface configuration.
 
-The redirection is performed by the shell and writes the removable USB device, not CMU storage. The
-collector itself still opens no output files. After the command exits, flush and remove the device
-using the stock system's normal procedure.
+Every file or command capture is capped at 256 KiB. The manifest records `ok`, `truncated`,
+`not_found`, `not_regular_file`, `permission_denied`, `io_error`, or `command_error` for each source.
+Missing sources are evidence about that firmware and are never a reason to elevate privileges.
 
-Treat report content as sensitive: boot arguments, mount paths, hostnames, and process names can
-identify the unit or its configuration. Review and redact a report before publishing it.
+Report content is sensitive. Review and redact hostnames, mount paths, network details, and process
+names before publishing it.
+
+## Phase 2: direct Mac report transport
+
+No direct Mac transport or remote shell is enabled yet. The published CMU kernel configuration lists
+ASIX AX88xxx, CDC Ethernet, and CDC NCM USB-network drivers as modules. That makes a USB-Ethernet
+peripheral a plausible host-safe link from a CMU armrest port to a Mac, without asking either host to
+pretend to be a USB device.
+
+The phase-1 report must first prove that the exact CMU has the corresponding modules and reveal its
+existing interface names and network tools. Only then should the project add an ephemeral, isolated
+link-local address and a one-shot report server. A later shell must be a separate explicit feature,
+key-only, bound only to that USB interface, non-persistent, and torn down when the payload or link
+exits.
+
+Until those facts are captured, do not load a module, change an interface, start SSH, install an
+authorized key, or connect the CMU to another network.
 
 ## Stop conditions
 
-Stop without trying to work around the condition if any of these occurs:
+Stop without working around the condition if:
 
-- the target ABI or dynamic loader has not been confirmed;
-- the drive is not mounted automatically by the stock CMU;
-- execution from removable media is denied;
-- running the collector would require root escalation, remounting, an exploit, or a CMU filesystem
-  write;
-- the CMU is connected to vehicle buses;
-- the display, camera, audio, power behavior, or stock HMI becomes abnormal.
-
-A `not_found`, `permission_denied`, `not_regular_file`, or `io_error` observation is expected on some
-firmware and is not a reason to raise privileges. Record the result and refine the allowlist later
-using an isolated bench fixture.
+- the firmware is not exactly `74.00.324` / `74.00.324A`;
+- the unit is connected to vehicle CAN or LIN;
+- the drive is not mounted and scanned automatically;
+- any firmware update or installation screen appears;
+- the report manifest is missing its final `result<TAB>complete` record;
+- the display, camera, audio, power behavior, or stock HMI becomes abnormal;
+- continuing would require a firmware package, persistence, remount, reboot, watchdog change, VIP
+  command, vehicle-bus access, or a second unreviewed exploit.
