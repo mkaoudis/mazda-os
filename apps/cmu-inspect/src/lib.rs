@@ -1299,6 +1299,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             fs::write(path, content).expect("write fixture");
         }
 
+        #[cfg(target_os = "linux")]
         fn assert_no_firmware_gate_copy(&self) {
             assert!(fs::read_dir(&self.0).expect("list USB root").all(|entry| {
                 !entry
@@ -1336,6 +1337,20 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             .args(arguments)
             .output()
             .expect("run command in fixture chroot")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_from_fixture_chroot(root: &Path, path: &str) -> std::process::Output {
+        if std::env::var_os("MAZDA_CMU_INSPECT_USE_SUDO_CHROOT").is_some() {
+            Command::new("sudo")
+                .args(["-n", "chroot"])
+                .arg(root)
+                .args(["/bin/busybox", "cat", path])
+                .output()
+                .expect("read fixture file as chroot root")
+        } else {
+            run_in_fixture_chroot(root, &["/bin/busybox", "cat", path])
+        }
     }
 
     #[test]
@@ -1663,26 +1678,22 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             String::from_utf8_lossy(&launcher_output.stderr)
         );
         assert_eq!(launcher_output.stdout, b".up\n");
-        let manifest_output = run_in_fixture_chroot(
-            &fixture.0,
-            &[
-                "/bin/busybox",
-                "cat",
-                "/tmp/mnt/sda1/mazda-cmu-report/manifest.tsv",
-            ],
+        let manifest_output =
+            read_from_fixture_chroot(&fixture.0, "/tmp/mnt/sda1/mazda-cmu-report/manifest.tsv");
+        assert!(
+            manifest_output.status.success(),
+            "could not read production manifest: {}",
+            String::from_utf8_lossy(&manifest_output.stderr)
         );
-        assert!(manifest_output.status.success());
         let manifest = String::from_utf8(manifest_output.stdout).expect("manifest is UTF-8");
         assert!(manifest.ends_with("result\tcomplete\n"));
-        let sync_marker_output = run_in_fixture_chroot(
-            &fixture.0,
-            &[
-                "/bin/busybox",
-                "cat",
-                "/tmp/mnt/sda1/mazda-cmu-report/sync-complete",
-            ],
+        let sync_marker_output =
+            read_from_fixture_chroot(&fixture.0, "/tmp/mnt/sda1/mazda-cmu-report/sync-complete");
+        assert!(
+            sync_marker_output.status.success(),
+            "could not read production sync marker: {}",
+            String::from_utf8_lossy(&sync_marker_output.stderr)
         );
-        assert!(sync_marker_output.status.success());
         assert_eq!(
             sync_marker_output.stdout,
             format!("{REPORT_BUILD_ID}\n").as_bytes()
