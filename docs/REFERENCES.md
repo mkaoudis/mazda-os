@@ -10,8 +10,9 @@ Primary sources and useful community work for Mazda Connect Gen 6 / 6.5 research
 | v59 < 59.00.502 | Still compatible with the older AIO access model. |
 | v59.00.502+ | Important lock-down boundary; later AIO workflows generally require serial access or previously installed recovery/autorun support. |
 | v70.00.000 / .021+ | CarPlay / Android Auto era. |
+| v70.00.100A NA | Current single-car target: the owner's 2019.5 CX-5 GT displays `70.00.100 NA N`; published component metadata lists software part `SWI10-24818-807R02`. |
 | v70.00.335+ | Additional lock-down; legacy autorun-based access is removed and serial-assisted methods become more important. |
-| v74.00.324A | Main production target for this project. Mature Gen-6 firmware; ZDI demonstrated root code execution on this exact release. |
+| v74.00.324A | ZDI's exact research target and a useful architectural reference, but not a production target for this project. |
 | v74.00.331 | Community-reported on some replacement CMUs; do not target unless encountered on hardware. |
 
 ## Primary technical references
@@ -22,6 +23,7 @@ Primary sources and useful community work for Mazda Connect Gen 6 / 6.5 research
 - [Mazda TSB 09-018/22](https://static.nhtsa.gov/odi/tsbs/2022/MC-10226834-0001.pdf) — official v74-era software-fix documentation referencing 74.00.324 or later.
 - [Mazda Service Alert SA-065/17](https://static.nhtsa.gov/odi/tsbs/2017/MC-10118479-9999.pdf) — useful historical reference for the 59.00.502-era Bluetooth/software transition.
 - [Mazda firmware changelogs](https://github.com/drone540/mazda-firmware-changelogs) — community-maintained version history across early Gen-6 through v70.
+- [Mazda-hosted NA 70.00.100A failsafe package](https://s3.amazonaws.com/tsd.mazdausa.com/MAZDA_CONNECT/cmu150_NA_70.00.100A_failsafe.up) — vendor-hosted package identity matching the owner's `70.00.100 NA N` display version; SHA-256 `ef9964509d81d47c1fcae35748096fe7021a9ea15b670acf5675a48679ddbccf`.
 - [Miatafy Gen-6 firmware/version reference](https://miatafy.com/firmware/versions/) — modern consolidation of v70/v74 versions, package metadata, regional differences, and the v74.00.331 caveat.
 
 ## Rooting and tweak ecosystem
@@ -29,7 +31,7 @@ Primary sources and useful community work for Mazda Connect Gen 6 / 6.5 research
 - [Mazda AIO Tweaks](https://mazdatweaks.com/) — canonical legacy tweak project; especially useful for firmware compatibility boundaries and examples of custom UI/apps running on the stock CMU.
 - [mzd-evo/mzd-connect-1-root](https://github.com/mzd-evo/mzd-connect-1-root) — modern root/access research used by later Gen-6 projects.
 - [shunceyb/mzd74-tweaks-no-touch](https://github.com/shunceyb/mzd74-tweaks-no-touch) — v74-specific tweak/root work demonstrating that later firmware remains modifiable.
-- [Miatafy/TouchTune](https://github.com/Miatafy/TouchTune) — current v74.00.324A USB-install work; useful evidence for a no-disassembly USB entry path on the main target firmware. The path still executes code as root and TouchTune itself makes persistent changes.
+- [Miatafy/TouchTune](https://github.com/Miatafy/TouchTune) — current v74.00.324A USB-install work; useful corroboration for ZDI's no-disassembly entry path on that reference version. The path still executes code as root and TouchTune itself makes persistent changes.
 
 ## Native application and UI development
 
@@ -42,7 +44,8 @@ Primary sources and useful community work for Mazda Connect Gen 6 / 6.5 research
 
 ## Working assumptions for mazda-os
 
-- Treat **74.00.324A** as the canonical production firmware target unless bench hardware proves otherwise.
+- Treat the owner's **2019.5 CX-5 GT on `70.00.100 NA N`** as the only production target. The corresponding internal gate is `70.00.100A-NA` plus software part `SWI10-24818-807R02`.
+- Treat ZDI's update-filename injection on this exact v70 build as unconfirmed until the target car returns a valid report; ZDI's published exact test target was `74.00.324A`.
 - Firmware lock-down primarily changes how privileged execution is obtained; once access is available, the CMU remains a conventional embedded Linux application platform.
 - Keep all project code on the application-processor side. Do not depend on VIP flashing, raw vehicle-bus access, or vehicle-control capabilities.
-- Validate important community claims against the bench CMU before making them architectural dependencies.
+- Validate important community claims against a report from the exact target CMU before making them architectural dependencies.

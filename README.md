@@ -10,7 +10,7 @@ The project is desktop-first and deliberately **not** a vehicle-control project.
 - Keep application behavior independent of the graphics backend; desktop uses a software framebuffer, while the CMU target is Wayland/EGL/OpenGL ES.
 - Treat vehicle state as typed, read-only application input through `MazdaReadOnly`.
 - Reuse stock CMU services only after their interfaces are understood.
-- Test on a spare bench CMU before the daily-driver unit, retaining the stock HMI as a fallback during early in-car work.
+- Keep the first hardware integration report-only and explicitly bound to the owner's exact CMU build, retaining the stock HMI as the fallback.
 
 ```text
                   UI / application
@@ -67,14 +67,13 @@ cargo test --workspace --locked
 
 ## Hardware development
 
-Use a spare CMU on a bench before touching the daily-driver unit. See [`docs/BENCH_SETUP.md`](docs/BENCH_SETUP.md).
+The first inspection utility is hard-coded for the owner's 2019.5 CX-5 GT on screen version
+`70.00.100 NA N`. It prepares a firmware-gated, report-only USB payload; it is not a general Mazda
+tool. A passive Mac-to-CMU cable is not supported because both ports are USB hosts. Read
+[`docs/CMU_USB_INSPECTION.md`](docs/CMU_USB_INSPECTION.md) before preparing or inserting media.
 
-The first inspection utility prepares a firmware-gated, report-only USB payload for an isolated
-Gen-6.5 bench CMU. A passive Mac-to-CMU cable is not supported because both ports are USB hosts.
-Read [`docs/CMU_USB_INSPECTION.md`](docs/CMU_USB_INSPECTION.md) before building or connecting
-anything.
-
-No code in this repository should yet be assumed safe for installation in a vehicle.
+No persistence, networking, remote shell, VIP access, CAN access, or LIN access is implemented.
+Bench work remains preferred for later mutating features; see [`docs/BENCH_SETUP.md`](docs/BENCH_SETUP.md).
 
 ## Disclaimer
 
