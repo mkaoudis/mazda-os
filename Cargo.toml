@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "apps/cmu-inspect",
     "apps/desktop",
     "crates/mazda-core",
     "crates/mazda-mock",
