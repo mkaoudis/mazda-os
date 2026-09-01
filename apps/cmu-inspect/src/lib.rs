@@ -1321,11 +1321,8 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     fn run_in_fixture_chroot(root: &Path, arguments: &[&str]) -> std::process::Output {
         let use_sudo = std::env::var_os("MAZDA_CMU_INSPECT_USE_SUDO_CHROOT").is_some();
         let mut command = if use_sudo {
-            let metadata = fs::metadata(root).expect("inspect chroot owner");
-            let userspec = format!("{}:{}", metadata.uid(), metadata.gid());
             let mut command = Command::new("sudo");
             command.args(["-n", "chroot"]);
-            command.arg(format!("--userspec={userspec}"));
             command
         } else {
             let mut command = Command::new("unshare");
@@ -1340,16 +1337,16 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     }
 
     #[cfg(target_os = "linux")]
-    fn read_from_fixture_chroot(root: &Path, path: &str) -> std::process::Output {
+    fn restore_fixture_ownership(root: &Path) {
         if std::env::var_os("MAZDA_CMU_INSPECT_USE_SUDO_CHROOT").is_some() {
-            Command::new("sudo")
-                .args(["-n", "chroot"])
+            let metadata = fs::metadata(root).expect("inspect chroot owner");
+            let userspec = format!("{}:{}", metadata.uid(), metadata.gid());
+            let status = Command::new("sudo")
+                .args(["-n", "chown", "-R", &userspec])
                 .arg(root)
-                .args(["/bin/busybox", "cat", path])
-                .output()
-                .expect("read fixture file as chroot root")
-        } else {
-            run_in_fixture_chroot(root, &["/bin/busybox", "cat", path])
+                .status()
+                .expect("restore fixture ownership");
+            assert!(status.success(), "could not restore fixture ownership");
         }
     }
 
@@ -1672,31 +1669,21 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             &fixture.0,
             &["/bin/busybox", "ash", "-c", &launcher_command],
         );
-        assert!(
-            launcher_output.status.success(),
-            "launcher chain failed: {}",
-            String::from_utf8_lossy(&launcher_output.stderr)
+        let manifest_output = run_in_fixture_chroot(
+            &fixture.0,
+            &[
+                "/bin/busybox",
+                "cat",
+                "/tmp/mnt/sda1/mazda-cmu-report/manifest.tsv",
+            ],
         );
-        assert_eq!(launcher_output.stdout, b".up\n");
-        let manifest_output =
-            read_from_fixture_chroot(&fixture.0, "/tmp/mnt/sda1/mazda-cmu-report/manifest.tsv");
-        assert!(
-            manifest_output.status.success(),
-            "could not read production manifest: {}",
-            String::from_utf8_lossy(&manifest_output.stderr)
-        );
-        let manifest = String::from_utf8(manifest_output.stdout).expect("manifest is UTF-8");
-        assert!(manifest.ends_with("result\tcomplete\n"));
-        let sync_marker_output =
-            read_from_fixture_chroot(&fixture.0, "/tmp/mnt/sda1/mazda-cmu-report/sync-complete");
-        assert!(
-            sync_marker_output.status.success(),
-            "could not read production sync marker: {}",
-            String::from_utf8_lossy(&sync_marker_output.stderr)
-        );
-        assert_eq!(
-            sync_marker_output.stdout,
-            format!("{REPORT_BUILD_ID}\n").as_bytes()
+        let sync_marker_output = run_in_fixture_chroot(
+            &fixture.0,
+            &[
+                "/bin/busybox",
+                "cat",
+                "/tmp/mnt/sda1/mazda-cmu-report/sync-complete",
+            ],
         );
 
         let timeout_started = std::time::Instant::now();
@@ -1709,9 +1696,34 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
                 "/bin/busybox timeout -t 1 -s KILL /bin/busybox sleep 5; timeout_status=$?; printf '%s\\n' \"$timeout_status\"",
             ],
         );
+        let timeout_elapsed = timeout_started.elapsed();
+        restore_fixture_ownership(&fixture.0);
+
+        assert!(
+            launcher_output.status.success(),
+            "launcher chain failed: {}",
+            String::from_utf8_lossy(&launcher_output.stderr)
+        );
+        assert_eq!(launcher_output.stdout, b".up\n");
+        assert!(
+            manifest_output.status.success(),
+            "could not read production manifest: {}",
+            String::from_utf8_lossy(&manifest_output.stderr)
+        );
+        let manifest = String::from_utf8(manifest_output.stdout).expect("manifest is UTF-8");
+        assert!(manifest.ends_with("result\tcomplete\n"));
+        assert!(
+            sync_marker_output.status.success(),
+            "could not read production sync marker: {}",
+            String::from_utf8_lossy(&sync_marker_output.stderr)
+        );
+        assert_eq!(
+            sync_marker_output.stdout,
+            format!("{REPORT_BUILD_ID}\n").as_bytes()
+        );
         assert!(timeout_output.status.success());
         assert_eq!(timeout_output.stdout, b"137\n");
-        assert!(timeout_started.elapsed() < Duration::from_secs(4));
+        assert!(timeout_elapsed < Duration::from_secs(4));
     }
 
     #[test]
