@@ -64,11 +64,10 @@ The window is the factory display resolution: **800×480**. Keyboard controls em
 
 - Arrow keys: rotate Commander knob
 - Enter / Space: select
-- Backspace: back
-- H: Home
-- M: Music
-- N: Navigation
-- F: Favorites
+- Backspace: cancel a pending menu selection
+- H / M: Home or Music → Now Playing
+- N: Navigation → Drive
+- F: Favorites → Settings
 - Escape: quit
 
 Run verification with:

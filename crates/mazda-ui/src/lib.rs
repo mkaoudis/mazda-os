@@ -10,6 +10,9 @@ pub const DISPLAY_HEIGHT: usize = 480;
 const GLYPH_SIZE: usize = 8;
 const CONTENT_WIDTH: usize = 528;
 const MAX_METADATA_CHARACTERS: usize = 256;
+const SPEED_COLUMN_WIDTH: usize = 170;
+const GEAR_COLUMN_WIDTH: usize = 120;
+const TEMPERATURE_COLUMN_WIDTH: usize = 158;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color(u32);
@@ -224,7 +227,7 @@ impl UiModel {
             CommanderEvent::Navigation => self.activate(Screen::Drive),
             CommanderEvent::Favorites => self.activate(Screen::Settings),
             CommanderEvent::Select => self.screen = self.selection,
-            CommanderEvent::Back => self.activate(Screen::NowPlaying),
+            CommanderEvent::Back => self.selection = self.screen,
         }
     }
 
@@ -354,17 +357,43 @@ impl UiModel {
     fn render_vehicle_card(&self, renderer: &mut impl Renderer, x: usize, y: usize) {
         renderer.fill_rect(Rect::new(x, y, 528, 78), Color::PANEL);
 
-        let speed = format!("{:.0} KM/H", self.vehicle.speed.get());
-        let temperature = format!("{:.0} C", self.vehicle.outside_temperature.get());
-        renderer.text(x + 20, y + 20, &speed, 2, Color::TEXT);
-        renderer.text(
+        let speed = measurement_label(
+            self.vehicle.speed.get(),
+            "KM/H",
+            SPEED_COLUMN_WIDTH / (GLYPH_SIZE * 2),
+        );
+        let temperature = measurement_label(
+            self.vehicle.outside_temperature.get(),
+            "C",
+            TEMPERATURE_COLUMN_WIDTH / GLYPH_SIZE,
+        );
+        render_fitted_text(
+            renderer,
+            x + 20,
+            y + 20,
+            &speed,
+            SPEED_COLUMN_WIDTH,
+            2,
+            Color::TEXT,
+        );
+        render_fitted_text(
+            renderer,
             x + 210,
             y + 23,
             gear_label(self.vehicle.gear),
+            GEAR_COLUMN_WIDTH,
             1,
             Color::TEXT_MUTED,
         );
-        renderer.text(x + 350, y + 23, &temperature, 1, Color::TEXT_MUTED);
+        render_fitted_text(
+            renderer,
+            x + 350,
+            y + 23,
+            &temperature,
+            TEMPERATURE_COLUMN_WIDTH,
+            1,
+            Color::TEXT_MUTED,
+        );
     }
 
     fn render_placeholder(renderer: &mut impl Renderer, title: &str, subtitle: &str) {
@@ -377,7 +406,7 @@ impl UiModel {
         renderer.text(
             24,
             451,
-            "ARROWS: MOVE  ENTER: OPEN  BACKSPACE: BACK  H/M/N/F: SHORTCUTS  ESC: QUIT",
+            "ARROWS: MOVE  ENTER: OPEN  BACKSPACE: CANCEL  H/M: MUSIC  N: DRIVE  F: SETTINGS  ESC: QUIT",
             1,
             Color::TEXT_MUTED,
         );
@@ -395,13 +424,25 @@ fn truncate_metadata(value: &mut Option<String>) {
     let Some(value) = value else {
         return;
     };
-    if let Some((index, _)) = value.char_indices().nth(MAX_METADATA_CHARACTERS) {
-        value.truncate(index);
-    }
+    *value = value.chars().take(MAX_METADATA_CHARACTERS).collect();
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.is_empty())
+}
+
+fn measurement_label(value: f32, unit: &str, max_characters: usize) -> String {
+    let unavailable = format!("-- {unit}");
+    if !value.is_finite() {
+        return unavailable;
+    }
+
+    let label = format!("{value:.0} {unit}");
+    if label.chars().count() > max_characters {
+        unavailable
+    } else {
+        label
+    }
 }
 
 fn render_fitted_text(
@@ -460,8 +501,8 @@ const fn gear_label(gear: Gear) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_media_state, fit_text, Color, Framebuffer, Rect, Renderer, Screen, UiModel,
-        DISPLAY_HEIGHT, DISPLAY_WIDTH, MAX_METADATA_CHARACTERS,
+        bounded_media_state, fit_text, measurement_label, Color, Framebuffer, Rect, Renderer,
+        Screen, UiModel, DISPLAY_HEIGHT, DISPLAY_WIDTH, MAX_METADATA_CHARACTERS,
     };
     use mazda_core::{
         CommanderEvent, Gear, MediaState, PlaybackState, SpeedKph, TemperatureC, VehicleSnapshot,
@@ -548,17 +589,53 @@ mod tests {
 
     #[test]
     fn media_metadata_is_bounded_before_rendering() {
+        let mut short_with_large_capacity = String::with_capacity(1_000_000);
+        short_with_large_capacity.push_str("Artist");
         let media = bounded_media_state(MediaState {
-            title: Some("A".repeat(MAX_METADATA_CHARACTERS + 100)),
-            artist: None,
+            title: Some("A".repeat(1_000_000)),
+            artist: Some(short_with_large_capacity),
             album: None,
             playback: PlaybackState::Playing,
         });
+        let title = media.title.expect("title");
+        let artist = media.artist.expect("artist");
 
-        assert_eq!(
-            media.title.expect("title").chars().count(),
-            MAX_METADATA_CHARACTERS
-        );
+        assert_eq!(title.chars().count(), MAX_METADATA_CHARACTERS);
+        assert!(title.capacity() <= MAX_METADATA_CHARACTERS * 4);
+        assert_eq!(artist, "Artist");
+        assert!(artist.capacity() <= MAX_METADATA_CHARACTERS * 4);
+    }
+
+    #[test]
+    fn oversized_and_non_finite_measurements_fail_closed() {
+        assert_eq!(measurement_label(f32::MAX, "KM/H", 10), "-- KM/H");
+        assert_eq!(measurement_label(f32::INFINITY, "KM/H", 10), "-- KM/H");
+        assert_eq!(measurement_label(f32::NAN, "C", 19), "-- C");
+        assert_eq!(measurement_label(22.4, "C", 19), "22 C");
+    }
+
+    #[test]
+    fn extreme_vehicle_values_render_safely() {
+        let ui = UiModel {
+            screen: Screen::Drive,
+            selection: Screen::Drive,
+            vehicle: VehicleSnapshot {
+                speed: SpeedKph::new(f32::MAX),
+                gear: Gear::Manual,
+                outside_temperature: TemperatureC::new(f32::MAX),
+            },
+            media: MediaState {
+                title: None,
+                artist: None,
+                album: None,
+                playback: PlaybackState::Stopped,
+            },
+        };
+        let mut framebuffer = Framebuffer::mazda_connect();
+
+        ui.render(&mut framebuffer);
+
+        assert_eq!(framebuffer.pixels().len(), DISPLAY_WIDTH * DISPLAY_HEIGHT);
     }
 
     #[test]
@@ -593,8 +670,17 @@ mod tests {
         assert_eq!(ui.screen(), Screen::NowPlaying);
         ui.handle_commander(CommanderEvent::Favorites);
         assert_eq!(ui.screen(), Screen::Settings);
-        ui.handle_commander(CommanderEvent::Back);
-        assert_eq!(ui.screen(), Screen::NowPlaying);
+        ui.handle_commander(CommanderEvent::RotateClockwise);
+        assert_eq!(ui.screen(), Screen::Settings);
         assert_eq!(ui.selection(), Screen::NowPlaying);
+        ui.handle_commander(CommanderEvent::Back);
+        assert_eq!(ui.screen(), Screen::Settings);
+        assert_eq!(ui.selection(), Screen::Settings);
+        ui.handle_commander(CommanderEvent::Home);
+        assert_eq!(ui.screen(), Screen::NowPlaying);
+        ui.handle_commander(CommanderEvent::Navigation);
+        assert_eq!(ui.screen(), Screen::Drive);
+        ui.handle_commander(CommanderEvent::Favorites);
+        assert_eq!(ui.screen(), Screen::Settings);
     }
 }
