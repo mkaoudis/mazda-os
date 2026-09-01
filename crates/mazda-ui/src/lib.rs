@@ -421,11 +421,10 @@ fn fit_text(text: &str, max_width: usize, preferred_scale: usize) -> (Cow<'_, st
     let preferred_scale = preferred_scale.max(1);
     let character_count = text.chars().count();
     let unscaled_width = character_count.saturating_mul(GLYPH_SIZE);
-    let scale = if unscaled_width == 0 {
-        preferred_scale
-    } else {
-        (max_width / unscaled_width).clamp(1, preferred_scale)
-    };
+    let scale = max_width
+        .checked_div(unscaled_width)
+        .unwrap_or(preferred_scale)
+        .clamp(1, preferred_scale);
     let glyph_advance = GLYPH_SIZE.saturating_mul(scale);
     let visible_characters = max_width / glyph_advance;
 
