@@ -75,6 +75,10 @@ from TouchTune or another community installer. Those projects remain ecosystem c
 Confirm the screen still reads exactly `70.00.100 NA N`. A different version, region, or terminal
 letter is a stop condition.
 
+`prepare-usb` is deliberately available only on macOS because its safety checks depend on
+`diskutil`. On Linux and Windows it returns an explicit unsupported-platform error without writing
+anything. `analyze-report` remains cross-platform.
+
 Use Disk Utility to erase a dedicated drive as FAT32 with an MBR partition map. The preparer uses
 `diskutil` to require FAT32 rather than FAT16, removable media, and
 `FDisk_partition_scheme`. It also requires the mounted volume root under `/Volumes`, refuses

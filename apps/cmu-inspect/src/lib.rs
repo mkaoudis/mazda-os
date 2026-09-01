@@ -6,8 +6,12 @@
 
 use std::ffi::OsStr;
 use std::fmt;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::fs;
+#[cfg(any(target_os = "macos", test))]
+use std::fs::OpenOptions;
+#[cfg(any(target_os = "macos", test))]
+use std::io::Write;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
@@ -27,8 +31,11 @@ pub const SUPPORTED_FIRMWARE: &str = "70.00.100A-NA";
 /// The software part number published for the NA 70.00.100A build.
 const SUPPORTED_SOFTWARE_PART_NUMBER: &str = "SWI10-24818-807R02";
 
+#[cfg(any(target_os = "macos", test))]
 const COLLECTOR_FILE_NAME: &str = "cmu-inspect.sh";
+#[cfg(any(target_os = "macos", test))]
 const UPDATE_FLAG_FILE_NAME: &str = "jci-autoupdate";
+#[cfg(any(target_os = "macos", test))]
 const COLLECTOR: &[u8] = include_bytes!("../assets/cmu-inspect.sh");
 const MAX_REPORT_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_CAPTURE_BYTES: u64 = 256 * 1024;
@@ -114,6 +121,7 @@ const OBSERVATIONS: [ObservationSpec; 17] = [
 /// An error encountered before or while preparing removable media.
 #[derive(Debug)]
 pub enum PrepareError {
+    UnsupportedPlatform,
     UnsupportedFirmware,
     DestinationNotFound,
     DestinationIsSymlink,
@@ -136,6 +144,10 @@ pub enum PrepareError {
 impl fmt::Display for PrepareError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedPlatform => write!(
+                formatter,
+                "prepare-usb is supported only on macOS; analyze-report remains cross-platform"
+            ),
             Self::UnsupportedFirmware => write!(
                 formatter,
                 "target must be explicitly confirmed as {TARGET_CONFIRMATION} ({TARGET_DISPLAY_VERSION})"
@@ -305,11 +317,28 @@ impl std::error::Error for AnalyzeError {
 ///
 /// Returns an error when the firmware was not explicitly confirmed, the destination is unsafe or
 /// non-empty, or any payload file cannot be created and flushed.
+#[cfg(target_os = "macos")]
 pub fn prepare_usb(destination: &Path, confirmed_target: &str) -> Result<(), PrepareError> {
     if confirmed_target != TARGET_CONFIRMATION {
         return Err(PrepareError::UnsupportedFirmware);
     }
 
+    verify_macos_volume(destination)?;
+    prepare_payload_files(destination)
+}
+
+/// Refuses to prepare executable media on platforms where the macOS volume checks are unavailable.
+///
+/// # Errors
+///
+/// Always returns [`PrepareError::UnsupportedPlatform`] without inspecting or writing the path.
+#[cfg(not(target_os = "macos"))]
+pub fn prepare_usb(_destination: &Path, _confirmed_target: &str) -> Result<(), PrepareError> {
+    Err(PrepareError::UnsupportedPlatform)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn prepare_payload_files(destination: &Path) -> Result<(), PrepareError> {
     let metadata = fs::symlink_metadata(destination).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             PrepareError::DestinationNotFound
@@ -326,9 +355,6 @@ pub fn prepare_usb(destination: &Path, confirmed_target: &str) -> Result<(), Pre
     if destination.parent().is_none() {
         return Err(PrepareError::DestinationTooBroad);
     }
-
-    #[cfg(target_os = "macos")]
-    verify_macos_volume(destination)?;
 
     let entries =
         fs::read_dir(destination).map_err(|error| io_error("list", destination, error))?;
@@ -367,6 +393,7 @@ pub fn prepare_usb(destination: &Path, confirmed_target: &str) -> Result<(), Pre
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn verify_prepared_entries(
     destination: &Path,
     payloads: &[(&str, &[u8])],
@@ -391,6 +418,7 @@ fn verify_prepared_entries(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn verify_payload_file(
     destination: &Path,
     name: &str,
@@ -526,18 +554,21 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
     })
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn create_new_file(path: &Path, content: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(content)?;
     file.sync_all()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn rollback_created_files(created: &[PathBuf]) {
     for path in created.iter().rev() {
         let _ = fs::remove_file(path);
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn is_ignorable_macos_metadata(name: &OsStr) -> bool {
     matches!(
         name.to_str(),
@@ -545,6 +576,7 @@ fn is_ignorable_macos_metadata(name: &OsStr) -> bool {
     )
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn io_error(action: &'static str, path: &Path, source: io::Error) -> PrepareError {
     PrepareError::Io {
         action,
@@ -971,7 +1003,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     fn prepares_exact_payload_without_overwriting() {
         let usb = TestDirectory::new("prepare");
 
-        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        prepare_payload_files(&usb.0).expect("prepare payload");
 
         assert_eq!(
             fs::read(usb.0.join(COLLECTOR_FILE_NAME)).expect("read collector"),
@@ -984,7 +1016,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         let launcher = launcher_file_name();
         assert!(usb.0.join(&launcher).is_file());
         assert!(matches!(
-            prepare_usb(&usb.0, TARGET_CONFIRMATION),
+            prepare_payload_files(&usb.0),
             Err(PrepareError::DestinationNotEmpty(_))
         ));
     }
@@ -993,7 +1025,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     #[cfg(target_os = "linux")]
     fn prepared_entry_verification_reads_back_exact_payload_bytes() {
         let usb = TestDirectory::new("prepare-readback");
-        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        prepare_payload_files(&usb.0).expect("prepare payload");
         let launcher = launcher_file_name();
         let payloads: [(&str, &[u8]); 3] = [
             (COLLECTOR_FILE_NAME, COLLECTOR),
@@ -1065,7 +1097,19 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     }
 
     #[test]
-    fn refuses_unconfirmed_target_before_writing() {
+    #[cfg(not(target_os = "macos"))]
+    fn prepare_refuses_unsupported_platform_before_writing() {
+        let usb = TestDirectory::new("firmware");
+
+        let result = prepare_usb(&usb.0, TARGET_CONFIRMATION);
+
+        assert!(matches!(result, Err(PrepareError::UnsupportedPlatform)));
+        assert_eq!(fs::read_dir(&usb.0).expect("list USB").count(), 0);
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn prepare_refuses_unconfirmed_target_before_writing() {
         let usb = TestDirectory::new("firmware");
 
         let result = prepare_usb(&usb.0, "cx5-2019.5-gt-74.00.324-na-n");
@@ -1123,7 +1167,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     fn collector_is_firmware_gated_bounded_and_usb_only() {
         let usb = TestDirectory::new("collector-usb");
         let root = TestDirectory::new("collector-root");
-        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        prepare_payload_files(&usb.0).expect("prepare payload");
         root.write("jci/version.ini", TARGET_VERSION_INI);
         root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
         root.write("proc/version", b"Linux fixture\n");
@@ -1196,7 +1240,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     fn collector_refuses_other_firmware_without_creating_report() {
         let usb = TestDirectory::new("refusal-usb");
         let root = TestDirectory::new("refusal-root");
-        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        prepare_payload_files(&usb.0).expect("prepare payload");
         root.write(
             "jci/version.ini",
             b"JCI_SW_VER=\"MAZ_CMU-150_74.00.324\"\n\
@@ -1222,7 +1266,7 @@ JCI_SW_PART_NUMBER=\"SWI10-26479-118R02\"\n",
     fn collector_refuses_wrong_patch_without_creating_report() {
         let usb = TestDirectory::new("patch-refusal-usb");
         let root = TestDirectory::new("patch-refusal-root");
-        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        prepare_payload_files(&usb.0).expect("prepare payload");
         root.write(
             "jci/version.ini",
             b"JCI_SW_VER=\"MAZ_CMU-150_70.00.100\"\n\
@@ -1275,7 +1319,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
         ] {
             let usb = TestDirectory::new(label);
             let root = TestDirectory::new(label);
-            prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+            prepare_payload_files(&usb.0).expect("prepare payload");
             root.write("jci/version.ini", version_ini.as_bytes());
 
             let output = Command::new("sh")
@@ -1296,7 +1340,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
     fn collector_records_timeouts_without_leaving_partial_files() {
         let usb = TestDirectory::new("timeout-usb");
         let root = TestDirectory::new("timeout-root");
-        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        prepare_payload_files(&usb.0).expect("prepare payload");
         root.write("jci/version.ini", TARGET_VERSION_INI);
         root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
 
@@ -1334,7 +1378,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
     fn analyzer_refuses_incomplete_report() {
         let usb = TestDirectory::new("incomplete-usb");
         let root = TestDirectory::new("incomplete-root");
-        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        prepare_payload_files(&usb.0).expect("prepare payload");
         root.write("jci/version.ini", TARGET_VERSION_INI);
         root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
         let output = Command::new("sh")
@@ -1365,7 +1409,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
     fn analyzer_rejects_tampering_duplicate_rows_and_extra_files() {
         let usb = TestDirectory::new("tamper-usb");
         let root = TestDirectory::new("tamper-root");
-        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        prepare_payload_files(&usb.0).expect("prepare payload");
         root.write("jci/version.ini", TARGET_VERSION_INI);
         root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
         let output = Command::new("sh")
