@@ -713,9 +713,9 @@ struct FirmwareIdentity<'a> {
 
 impl<'a> FirmwareIdentity<'a> {
     fn parse(version_file: &'a str) -> Option<Self> {
-        let version = unique_quoted_ini_value(version_file, "JCI_SW_VER")?.to_ascii_uppercase();
-        let patch = unique_quoted_ini_value(version_file, "JCI_SW_VER_PATCH")?.to_ascii_uppercase();
-        let flavor = unique_quoted_ini_value(version_file, "JCI_SW_FLAVOR")?.to_ascii_uppercase();
+        let version = unique_quoted_ini_value(version_file, "JCI_SW_VER")?.to_owned();
+        let patch = unique_quoted_ini_value(version_file, "JCI_SW_VER_PATCH")?.to_owned();
+        let flavor = unique_quoted_ini_value(version_file, "JCI_SW_FLAVOR")?.to_owned();
         let software_part_number = unique_quoted_ini_value(version_file, "JCI_SW_PART_NUMBER")?;
 
         Some(Self {
@@ -1102,6 +1102,9 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             std::str::from_utf8(TARGET_VERSION_INI)
                 .expect("fixture is UTF-8")
                 .replace("_70.00.100\"", "_70.00.100A\""),
+            std::str::from_utf8(TARGET_VERSION_INI)
+                .expect("fixture is UTF-8")
+                .replace("JCI_SW_VER_PATCH=\"A\"", "JCI_SW_VER_PATCH=\"a\""),
         ] {
             assert!(!FirmwareIdentity::parse(&rejected)
                 .expect("parse non-target identity")
@@ -1264,6 +1267,10 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
             (
                 "embedded-patch",
                 target.replace("_70.00.100\"", "_70.00.100A\""),
+            ),
+            (
+                "lowercase-patch",
+                target.replace("JCI_SW_VER_PATCH=\"A\"", "JCI_SW_VER_PATCH=\"a\""),
             ),
         ] {
             let usb = TestDirectory::new(label);
