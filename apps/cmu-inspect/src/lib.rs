@@ -157,6 +157,7 @@ pub enum PrepareError {
     DestinationNotMbr,
     DestinationNotEmpty(String),
     UnexpectedPostWriteEntry(String),
+    PreparedPayloadMismatch(String),
     Io {
         action: &'static str,
         path: PathBuf,
@@ -199,6 +200,10 @@ impl fmt::Display for PrepareError {
             Self::UnexpectedPostWriteEntry(name) => write!(
                 formatter,
                 "unexpected entry {name:?} appeared while preparing the drive; payload was rolled back"
+            ),
+            Self::PreparedPayloadMismatch(name) => write!(
+                formatter,
+                "prepared payload file {name:?} did not match the intended bytes; payload was rolled back"
             ),
             Self::Io {
                 action,
@@ -258,6 +263,10 @@ pub enum AnalyzeError {
     UnexpectedFile(String),
     InvalidSchema,
     InvalidObservation(&'static str),
+    ObservationFailed {
+        source: &'static str,
+        status: &'static str,
+    },
     ChecksumMismatch(&'static str),
     IncompleteReport,
     UnsupportedFirmware(String),
@@ -284,6 +293,9 @@ impl fmt::Display for AnalyzeError {
             Self::InvalidSchema => write!(formatter, "report manifest schema is not supported"),
             Self::InvalidObservation(source) => {
                 write!(formatter, "manifest record for {source} is invalid")
+            }
+            Self::ObservationFailed { source, status } => {
+                write!(formatter, "CMU observation {source} failed with {status}")
             }
             Self::ChecksumMismatch(name) => {
                 write!(
@@ -373,7 +385,7 @@ pub fn prepare_usb(
     ];
     let mut created = Vec::with_capacity(payloads.len());
 
-    for (name, content) in payloads {
+    for &(name, content) in &payloads {
         let path = destination.join(name);
         if let Err(error) = create_new_file(&path, content) {
             let _ = fs::remove_file(&path);
@@ -383,7 +395,7 @@ pub fn prepare_usb(
         created.push(path);
     }
 
-    if let Err(error) = verify_prepared_entries(destination, &launcher_file_name) {
+    if let Err(error) = verify_prepared_entries(destination, &payloads) {
         rollback_created_files(&created);
         return Err(error);
     }
@@ -391,20 +403,52 @@ pub fn prepare_usb(
     Ok(())
 }
 
-fn verify_prepared_entries(destination: &Path, launcher: &str) -> Result<(), PrepareError> {
+fn verify_prepared_entries(
+    destination: &Path,
+    payloads: &[(&str, &[u8])],
+) -> Result<(), PrepareError> {
     let entries = fs::read_dir(destination)
         .map_err(|error| io_error("verify prepared drive", destination, error))?;
     for entry in entries {
         let entry = entry.map_err(|error| io_error("verify prepared drive", destination, error))?;
         let name = entry.file_name();
-        let is_payload = name == OsStr::new(COLLECTOR_FILE_NAME)
-            || name == OsStr::new(UPDATE_FLAG_FILE_NAME)
-            || name == OsStr::new(launcher);
+        let is_payload = payloads
+            .iter()
+            .any(|(payload_name, _)| name == OsStr::new(payload_name));
         if !is_payload && !is_ignorable_macos_metadata(&name) {
             return Err(PrepareError::UnexpectedPostWriteEntry(
                 name.to_string_lossy().into_owned(),
             ));
         }
+    }
+    for &(name, expected) in payloads {
+        verify_payload_file(destination, name, expected)?;
+    }
+    Ok(())
+}
+
+fn verify_payload_file(
+    destination: &Path,
+    name: &str,
+    expected: &[u8],
+) -> Result<(), PrepareError> {
+    let path = destination.join(name);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| io_error("verify payload file", &path, error))?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() != u64::try_from(expected.len()).expect("payload length fits in u64")
+    {
+        return Err(PrepareError::PreparedPayloadMismatch(name.to_owned()));
+    }
+    let mut actual = Vec::with_capacity(expected.len() + 1);
+    fs::File::open(&path)
+        .map_err(|error| io_error("open payload for verification", &path, error))?
+        .take(u64::try_from(expected.len()).expect("payload length fits in u64") + 1)
+        .read_to_end(&mut actual)
+        .map_err(|error| io_error("read payload for verification", &path, error))?;
+    if actual != expected {
+        return Err(PrepareError::PreparedPayloadMismatch(name.to_owned()));
     }
     Ok(())
 }
@@ -573,6 +617,19 @@ fn validate_observation(
     let bytes = fields[2]
         .parse::<u64>()
         .map_err(|_| AnalyzeError::InvalidObservation(spec.source))?;
+    if matches!(status, "timeout" | "io_error") {
+        if bytes == 0 && fields[3] == "-" && fields[4] == "-" {
+            return Err(AnalyzeError::ObservationFailed {
+                source: spec.source,
+                status: if status == "timeout" {
+                    "timeout"
+                } else {
+                    "io_error"
+                },
+            });
+        }
+        return Err(AnalyzeError::InvalidObservation(spec.source));
+    }
     if matches!(status, "ok" | "truncated") {
         if fields[4] != spec.file
             || bytes > MAX_CAPTURE_BYTES
@@ -595,12 +652,7 @@ fn validate_observation(
         })
     } else if matches!(
         status,
-        "not_found"
-            | "not_regular_file"
-            | "permission_denied"
-            | "io_error"
-            | "timeout"
-            | "dependency_failed"
+        "not_found" | "not_regular_file" | "permission_denied" | "dependency_failed"
     ) && bytes == 0
         && fields[3] == "-"
         && fields[4] == "-"
@@ -942,6 +994,28 @@ mod tests {
     }
 
     #[test]
+    fn prepared_entry_verification_reads_back_exact_payload_bytes() {
+        let usb = TestDirectory::new("prepare-readback");
+        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
+        let launcher = launcher_file_name(CmuMount::Sda1);
+        let payloads: [(&str, &[u8]); 3] = [
+            (COLLECTOR_FILE_NAME, COLLECTOR),
+            (UPDATE_FLAG_FILE_NAME, b"\n"),
+            (&launcher, b"\n"),
+        ];
+
+        fs::write(usb.0.join(UPDATE_FLAG_FILE_NAME), b"changed").expect("corrupt prepared flag");
+        assert!(matches!(
+            verify_prepared_entries(&usb.0, &payloads),
+            Err(PrepareError::PreparedPayloadMismatch(name)) if name == UPDATE_FLAG_FILE_NAME
+        ));
+
+        fs::write(usb.0.join(UPDATE_FLAG_FILE_NAME), b"\n").expect("restore prepared flag");
+        fs::remove_file(usb.0.join(COLLECTOR_FILE_NAME)).expect("remove prepared collector");
+        assert!(verify_prepared_entries(&usb.0, &payloads).is_err());
+    }
+
+    #[test]
     fn launcher_name_is_a_single_valid_fat_component() {
         let launcher = launcher_file_name(CmuMount::Sdb1);
         assert!(launcher.len() <= 255);
@@ -1022,6 +1096,10 @@ mod tests {
         root.write(
             "lib/modules/9.9.9/kernel/drivers/net/usb/cdc_ncm.ko",
             b"stale fixture module",
+        );
+        root.write(
+            "lib/modules/3.0.35/kernel/drivers/net/usb/unrelated.ko",
+            b"unrelated fixture module",
         );
         root.write(
             "proc/net/dev",
@@ -1150,6 +1228,13 @@ mod tests {
                 .file_name()
                 .to_string_lossy()
                 .starts_with('.')));
+        assert!(matches!(
+            analyze_report(&report),
+            Err(AnalyzeError::ObservationFailed {
+                status: "timeout",
+                ..
+            })
+        ));
     }
 
     #[test]

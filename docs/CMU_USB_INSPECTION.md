@@ -110,8 +110,9 @@ authenticity claim.
 
 The report covers CMU and kernel versions; CPU and memory information; mounts and partitions;
 loaded modules and kernel configuration when exposed by `/proc`; input, framebuffer, DRM, USB, and
-unclassified network-interface inventories; and USB-network module filenames only from the exact
-running-kernel release directory. It does not enumerate processes or execute network tools.
+unclassified network-interface inventories; and only the explicitly relevant `usbnet`, `asix`,
+`cdc_ether`, and `cdc_ncm` filenames from the exact running-kernel release directory. It does not
+enumerate processes, scan a module directory, or execute network tools.
 
 Back on the Mac, validate before opening individual files or making a transport decision:
 
@@ -121,10 +122,11 @@ cargo run --locked -p mazda-cmu-inspect -- \
 ```
 
 The analyzer is read-only. It rejects a missing or incorrect completion marker, missing or duplicate
-rows, unknown statuses, wrong sizes or checksums, unexpected files, symlinks, captures over 1 MiB,
-the wrong build ID, module paths from any kernel other than the reported running release, and any
-firmware identity other than `74.00.324A`. Interface names are reported as unclassified; names alone
-are never treated as proof that an interface is unrelated to the vehicle.
+rows, unknown statuses, any `timeout` or `io_error`, wrong sizes or checksums, unexpected files,
+symlinks, captures over 1 MiB, the wrong build ID, module paths from any kernel other than the
+reported running release, and any firmware identity other than `74.00.324A`. Interface names are
+reported as unclassified; names alone are never treated as proof that an interface is unrelated to
+the vehicle.
 
 Allowed failure statuses are `not_found`, `not_regular_file`, `permission_denied`, `io_error`,
 `timeout`, and `dependency_failed`. Missing evidence is never a reason to elevate privileges or

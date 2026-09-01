@@ -249,14 +249,16 @@ capture_network_module_files() {
         record_status "$source_name" io_error 0 - -
         return
     }
-    for module_path in "$module_directory"/*.ko "$module_directory"/*.ko.gz \
-        "$module_directory"/*.ko.xz; do
-        [ -f "$module_path" ] || continue
-        printf '%s\n' "${module_path#"${CMU_ROOT}"/}" >>"$part_file" 2>/dev/null || {
-            rm -f "$part_file"
-            record_status "$source_name" io_error 0 - -
-            return
-        }
+    for module_name in usbnet asix cdc_ether cdc_ncm; do
+        for module_suffix in .ko .ko.gz .ko.xz; do
+            module_path="$module_directory/$module_name$module_suffix"
+            [ -f "$module_path" ] || continue
+            printf '%s\n' "${module_path#"${CMU_ROOT}"/}" >>"$part_file" 2>/dev/null || {
+                rm -f "$part_file"
+                record_status "$source_name" io_error 0 - -
+                return
+            }
+        done
     done
     finalize_capture "$source_name" "$output_name" "$part_file" ok
 }
