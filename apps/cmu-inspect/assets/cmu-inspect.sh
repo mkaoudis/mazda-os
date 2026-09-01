@@ -69,6 +69,8 @@ esac
 
 if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" != "1" ]; then
     "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" true >/dev/null 2>&1 || exit 68
+    "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" dd if=/dev/null of=/dev/null \
+        bs=1 count=1 >/dev/null 2>&1 || exit 68
     "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" cksum "$VERSION_PATH" \
         >/dev/null 2>&1 || exit 68
 fi

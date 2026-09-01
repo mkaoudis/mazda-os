@@ -30,7 +30,7 @@ The first CMU integration is observational. Any future mutating infotainment ope
 
 ```text
 apps/
-  cmu-inspect/    allowlisted, stdout-only CMU metadata collector
+  cmu-inspect/    firmware-gated, report-only CMU metadata collector
   desktop/       800×480 desktop simulator
 crates/
   mazda-core/    domain types and read-only capability boundary
