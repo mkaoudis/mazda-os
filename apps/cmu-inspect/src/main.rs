@@ -3,12 +3,12 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use mazda_cmu_inspect::{
-    analyze_report, prepare_usb, ReportAnalysis, UsbNetworkDriver, SUPPORTED_FIRMWARE,
+    analyze_report, prepare_usb, CmuMount, ReportAnalysis, UsbNetworkDriver, SUPPORTED_FIRMWARE,
 };
 
 fn usage() {
     eprintln!(
-        "Usage:\n  mazda-cmu-inspect prepare-usb --firmware {SUPPORTED_FIRMWARE} /Volumes/<drive>\n  mazda-cmu-inspect analyze-report /Volumes/<drive>/mazda-cmu-report"
+        "Usage:\n  mazda-cmu-inspect prepare-usb --firmware {SUPPORTED_FIRMWARE} --cmu-mount sda1|sdb1 /Volumes/<drive>\n  mazda-cmu-inspect analyze-report /Volumes/<drive>/mazda-cmu-report"
     );
 }
 
@@ -25,16 +25,21 @@ fn main() -> ExitCode {
         }
     }
 
-    let [command, firmware_flag, firmware, destination] = arguments.as_slice() else {
+    let [command, firmware_flag, firmware, mount_flag, mount, destination] = arguments.as_slice()
+    else {
         usage();
         return ExitCode::from(64);
     };
-    if command != "prepare-usb" || firmware_flag != "--firmware" {
+    if command != "prepare-usb" || firmware_flag != "--firmware" || mount_flag != "--cmu-mount" {
         usage();
         return ExitCode::from(64);
     }
+    let Ok(cmu_mount) = mount.parse::<CmuMount>() else {
+        eprintln!("CMU mount must be exactly sda1 or sdb1");
+        return ExitCode::from(64);
+    };
 
-    if let Err(error) = prepare_usb(Path::new(destination), firmware) {
+    if let Err(error) = prepare_usb(Path::new(destination), firmware, cmu_mount) {
         eprintln!("could not prepare CMU inspection USB: {error}");
         return ExitCode::FAILURE;
     }

