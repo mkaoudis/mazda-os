@@ -973,6 +973,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn prepares_exact_payload_without_overwriting() {
         let usb = TestDirectory::new("prepare");
 
@@ -995,6 +996,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn prepared_entry_verification_reads_back_exact_payload_bytes() {
         let usb = TestDirectory::new("prepare-readback");
         prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
