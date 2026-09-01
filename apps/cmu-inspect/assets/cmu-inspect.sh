@@ -120,6 +120,18 @@ capture_command() {
     fi
 }
 
+capture_network_module_files() {
+    output_name=usb-network-modules.txt
+    part_file="$REPORT/.$output_name.part"
+    (
+        for module_path in "${CMU_ROOT}"/lib/modules/*/kernel/drivers/net/usb/*.ko*; do
+            [ -f "$module_path" ] || continue
+            printf '%s\n' "${module_path#"${CMU_ROOT}"/}"
+        done
+    ) | dd of="$part_file" bs="$BLOCK_SIZE" count="$BLOCKS_WITH_SENTINEL" 2>/dev/null
+    finalize_capture module-files/usb-network "$output_name" "$part_file" ok
+}
+
 capture_file jci/version.ini firmware-version.ini
 capture_file proc/version kernel-version.txt
 capture_file proc/cmdline kernel-command-line.txt
@@ -138,11 +150,13 @@ capture_file proc/bus/usb/devices usb-devices.txt
 capture_file sys/class/graphics/fb0/name framebuffer-name.txt
 capture_file sys/class/graphics/fb0/modes framebuffer-modes.txt
 capture_file sys/class/drm/card0/device/uevent drm-device.txt
+capture_network_module_files
 
 capture_command uname uname.txt /bin/uname -a
 capture_command processes processes.txt /bin/ps
 capture_command filesystems filesystems.txt /bin/df -k
 capture_command interfaces interfaces.txt /sbin/ifconfig -a
+capture_command busybox-applets busybox-applets.txt /bin/busybox --list
 
 printf 'result\tcomplete\n' >>"$MANIFEST" 2>/dev/null || exit 74
 if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" != "1" ]; then

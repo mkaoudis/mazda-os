@@ -2,11 +2,13 @@ use std::env;
 use std::path::Path;
 use std::process::ExitCode;
 
-use mazda_cmu_inspect::{prepare_usb, SUPPORTED_FIRMWARE};
+use mazda_cmu_inspect::{
+    analyze_report, prepare_usb, ReportAnalysis, UsbNetworkDriver, SUPPORTED_FIRMWARE,
+};
 
 fn usage() {
     eprintln!(
-        "Usage:\n  mazda-cmu-inspect prepare-usb --firmware {SUPPORTED_FIRMWARE} /Volumes/<drive>"
+        "Usage:\n  mazda-cmu-inspect prepare-usb --firmware {SUPPORTED_FIRMWARE} /Volumes/<drive>\n  mazda-cmu-inspect analyze-report /Volumes/<drive>/mazda-cmu-report"
     );
 }
 
@@ -15,6 +17,12 @@ fn main() -> ExitCode {
     if arguments.as_slice() == ["--help"] || arguments.as_slice() == ["-h"] {
         usage();
         return ExitCode::SUCCESS;
+    }
+
+    if let [command, report_directory] = arguments.as_slice() {
+        if command == "analyze-report" {
+            return analyze(Path::new(report_directory));
+        }
     }
 
     let [command, firmware_flag, firmware, destination] = arguments.as_slice() else {
@@ -33,4 +41,66 @@ fn main() -> ExitCode {
 
     println!("Prepared report-only CMU payload for {SUPPORTED_FIRMWARE} at {destination}");
     ExitCode::SUCCESS
+}
+
+fn analyze(report_directory: &Path) -> ExitCode {
+    match analyze_report(report_directory) {
+        Ok(analysis) => {
+            print_analysis(&analysis);
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("could not analyze CMU report: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn print_analysis(analysis: &ReportAnalysis) {
+    println!("Firmware: {} (supported)", analysis.firmware);
+    println!(
+        "USB-network drivers available: {}",
+        if analysis.available_usb_network_drivers.is_empty() {
+            "none".to_owned()
+        } else {
+            analysis
+                .available_usb_network_drivers
+                .iter()
+                .map(|driver| match driver {
+                    UsbNetworkDriver::Asix => "asix",
+                    UsbNetworkDriver::CdcEther => "cdc_ether",
+                    UsbNetworkDriver::CdcNcm => "cdc_ncm",
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    println!(
+        "USB-network modules currently loaded: {}",
+        if analysis.loaded_usb_network_modules.is_empty() {
+            "none".to_owned()
+        } else {
+            analysis.loaded_usb_network_modules.join(", ")
+        }
+    );
+    println!(
+        "Observed non-vehicle interfaces: {}",
+        if analysis.observed_non_vehicle_interfaces.is_empty() {
+            "none".to_owned()
+        } else {
+            analysis.observed_non_vehicle_interfaces.join(", ")
+        }
+    );
+    println!(
+        "BusyBox httpd available: {}",
+        analysis.has_busybox_applet("httpd")
+    );
+    println!(
+        "BusyBox nc available: {}",
+        analysis.has_busybox_applet("nc")
+    );
+    println!(
+        "Passive USB-Ethernet probe supported by report: {}",
+        analysis.supports_passive_adapter_probe()
+    );
 }

@@ -7,7 +7,7 @@
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
@@ -29,6 +29,7 @@ pub const LAUNCHER_FILE_NAME: &str =
 const COLLECTOR_FILE_NAME: &str = "cmu-inspect.sh";
 const UPDATE_FLAG_FILE_NAME: &str = "jci-autoupdate";
 const COLLECTOR: &[u8] = include_bytes!("../assets/cmu-inspect.sh");
+const MAX_REPORT_FILE_BYTES: u64 = 1024 * 1024;
 
 /// An error encountered before or while preparing removable media.
 #[derive(Debug)]
@@ -88,6 +89,93 @@ impl fmt::Display for PrepareError {
 }
 
 impl std::error::Error for PrepareError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
+/// Evidence from a completed phase-one report that is relevant to a later USB-Ethernet probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReportAnalysis {
+    pub firmware: String,
+    pub available_usb_network_drivers: Vec<UsbNetworkDriver>,
+    pub loaded_usb_network_modules: Vec<String>,
+    pub observed_non_vehicle_interfaces: Vec<String>,
+    pub busybox_applets: Vec<String>,
+}
+
+/// USB-network driver families relevant to a host-safe Mac transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum UsbNetworkDriver {
+    Asix,
+    CdcEther,
+    CdcNcm,
+}
+
+impl ReportAnalysis {
+    /// Whether the report contains enough evidence to justify a passive USB-Ethernet adapter probe.
+    ///
+    /// This does not authorize loading a module or configuring an interface.
+    #[must_use]
+    pub const fn supports_passive_adapter_probe(&self) -> bool {
+        !self.available_usb_network_drivers.is_empty()
+    }
+
+    #[must_use]
+    pub fn has_busybox_applet(&self, applet: &str) -> bool {
+        self.busybox_applets.iter().any(|item| item == applet)
+    }
+}
+
+/// An error encountered while validating a report copied back to the Mac.
+#[derive(Debug)]
+pub enum AnalyzeError {
+    ReportNotFound,
+    ReportNotDirectory,
+    MissingFile(&'static str),
+    OversizedFile(&'static str),
+    InvalidFileType(&'static str),
+    InvalidSchema,
+    IncompleteReport,
+    UnsupportedFirmware(String),
+    Io {
+        action: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+}
+
+impl fmt::Display for AnalyzeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ReportNotFound => write!(formatter, "report directory does not exist"),
+            Self::ReportNotDirectory => write!(formatter, "report path is not a directory"),
+            Self::MissingFile(name) => write!(formatter, "report is missing {name}"),
+            Self::OversizedFile(name) => write!(formatter, "report file {name} exceeds 1 MiB"),
+            Self::InvalidFileType(name) => {
+                write!(formatter, "report file {name} is not a regular file")
+            }
+            Self::InvalidSchema => write!(formatter, "report manifest schema is not supported"),
+            Self::IncompleteReport => {
+                write!(formatter, "report does not end with a complete record")
+            }
+            Self::UnsupportedFirmware(firmware) => write!(
+                formatter,
+                "report is from unsupported firmware {firmware:?}, expected {SUPPORTED_FIRMWARE}"
+            ),
+            Self::Io {
+                action,
+                path,
+                source,
+            } => write!(formatter, "could not {action} {}: {source}", path.display()),
+        }
+    }
+}
+
+impl std::error::Error for AnalyzeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
@@ -161,6 +249,85 @@ pub fn prepare_usb(destination: &Path, confirmed_firmware: &str) -> Result<(), P
     Ok(())
 }
 
+/// Validates and analyzes a completed `mazda-cmu-report` directory.
+///
+/// The analyzer is read-only and caps every report file at 1 MiB before reading it. Its transport
+/// result is evidence for a later passive hardware probe, not permission to alter CMU networking.
+///
+/// # Errors
+///
+/// Returns an error when the report is missing, malformed, incomplete, oversized, unreadable, or
+/// from any firmware other than [`SUPPORTED_FIRMWARE`].
+pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, AnalyzeError> {
+    let metadata = fs::metadata(report_directory).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            AnalyzeError::ReportNotFound
+        } else {
+            analyze_io_error("inspect", report_directory, error)
+        }
+    })?;
+    if !metadata.is_dir() {
+        return Err(AnalyzeError::ReportNotDirectory);
+    }
+
+    let manifest = read_required_report_file(report_directory, "manifest.tsv")?;
+    let mut manifest_lines = manifest.lines();
+    if manifest_lines.next() != Some("mazda-cmu-report\t1")
+        || manifest_lines.next() != Some("source\tstatus\tbytes")
+    {
+        return Err(AnalyzeError::InvalidSchema);
+    }
+    if manifest.lines().last() != Some("result\tcomplete") {
+        return Err(AnalyzeError::IncompleteReport);
+    }
+
+    let firmware_file = read_required_report_file(report_directory, "firmware-version.ini")?;
+    let firmware = parse_firmware(&firmware_file).ok_or(AnalyzeError::InvalidSchema)?;
+    if firmware != "74.00.324" && firmware != SUPPORTED_FIRMWARE {
+        return Err(AnalyzeError::UnsupportedFirmware(firmware));
+    }
+
+    let module_files = read_successful_observation(
+        report_directory,
+        &manifest,
+        "module-files/usb-network",
+        "usb-network-modules.txt",
+    )?;
+    let loaded_modules =
+        read_successful_observation(report_directory, &manifest, "proc/modules", "modules.txt")?;
+    let network_devices = read_successful_observation(
+        report_directory,
+        &manifest,
+        "proc/net/dev",
+        "network-devices.txt",
+    )?;
+    let busybox_applets = read_successful_observation(
+        report_directory,
+        &manifest,
+        "busybox-applets",
+        "busybox-applets.txt",
+    )?;
+
+    let mut available_usb_network_drivers = Vec::new();
+    for (module, driver) in [
+        ("asix", UsbNetworkDriver::Asix),
+        ("cdc_ether", UsbNetworkDriver::CdcEther),
+        ("cdc_ncm", UsbNetworkDriver::CdcNcm),
+    ] {
+        if module_is_available(&module_files, &loaded_modules, module) {
+            available_usb_network_drivers.push(driver);
+        }
+    }
+
+    Ok(ReportAnalysis {
+        firmware,
+        available_usb_network_drivers,
+        loaded_usb_network_modules: parse_loaded_usb_network_modules(&loaded_modules),
+        observed_non_vehicle_interfaces: parse_non_vehicle_interfaces(&network_devices),
+        busybox_applets: parse_exact_lines(&busybox_applets),
+    })
+}
+
 fn create_new_file(path: &Path, content: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(content)?;
@@ -186,6 +353,148 @@ fn io_error(action: &'static str, path: &Path, source: io::Error) -> PrepareErro
         path: path.to_owned(),
         source,
     }
+}
+
+fn analyze_io_error(action: &'static str, path: &Path, source: io::Error) -> AnalyzeError {
+    AnalyzeError::Io {
+        action,
+        path: path.to_owned(),
+        source,
+    }
+}
+
+fn read_required_report_file(
+    report_directory: &Path,
+    name: &'static str,
+) -> Result<String, AnalyzeError> {
+    let path = report_directory.join(name);
+    if !path.exists() {
+        return Err(AnalyzeError::MissingFile(name));
+    }
+    read_report_file(&path, name)
+}
+
+fn read_optional_report_file(
+    report_directory: &Path,
+    name: &'static str,
+) -> Result<String, AnalyzeError> {
+    let path = report_directory.join(name);
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    read_report_file(&path, name)
+}
+
+fn read_successful_observation(
+    report_directory: &Path,
+    manifest: &str,
+    source: &str,
+    file_name: &'static str,
+) -> Result<String, AnalyzeError> {
+    let status = manifest.lines().find_map(|line| {
+        let mut fields = line.split('\t');
+        if fields.next() == Some(source) {
+            fields.next()
+        } else {
+            None
+        }
+    });
+    if !matches!(status, Some("ok" | "truncated")) {
+        return Ok(String::new());
+    }
+    read_optional_report_file(report_directory, file_name)
+}
+
+fn read_report_file(path: &Path, name: &'static str) -> Result<String, AnalyzeError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| analyze_io_error("inspect", path, error))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(AnalyzeError::InvalidFileType(name));
+    }
+    if metadata.len() > MAX_REPORT_FILE_BYTES {
+        return Err(AnalyzeError::OversizedFile(name));
+    }
+
+    let file = fs::File::open(path).map_err(|error| analyze_io_error("open", path, error))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_REPORT_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| analyze_io_error("read", path, error))?;
+    if u64::try_from(bytes.len()).expect("report byte count fits in u64") > MAX_REPORT_FILE_BYTES {
+        return Err(AnalyzeError::OversizedFile(name));
+    }
+
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn parse_firmware(version_file: &str) -> Option<String> {
+    let value = version_file
+        .lines()
+        .find_map(|line| line.strip_prefix("JCI_SW_VER="))?
+        .trim_end_matches('\r')
+        .trim_matches('"');
+    value.rsplit('_').next().map(str::to_owned)
+}
+
+fn module_is_available(module_files: &str, loaded_modules: &str, module: &str) -> bool {
+    loaded_modules
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(module))
+        || module_files.lines().any(|line| {
+            let file_name = line.rsplit('/').next().unwrap_or(line);
+            [
+                format!("{module}.ko"),
+                format!("{module}.ko.gz"),
+                format!("{module}.ko.xz"),
+            ]
+            .iter()
+            .any(|candidate| file_name == candidate)
+        })
+}
+
+fn parse_non_vehicle_interfaces(network_devices: &str) -> Vec<String> {
+    let mut interfaces = network_devices
+        .lines()
+        .filter_map(|line| line.split_once(':').map(|(name, _)| name.trim()))
+        .filter(|name| {
+            !name.is_empty()
+                && *name != "lo"
+                && !name.starts_with("can")
+                && !name.starts_with("vcan")
+                && !name.starts_with("slcan")
+                && name
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "_.-".contains(character))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    interfaces.sort_unstable();
+    interfaces.dedup();
+    interfaces
+}
+
+fn parse_loaded_usb_network_modules(loaded_modules: &str) -> Vec<String> {
+    let mut modules = loaded_modules
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|module| matches!(*module, "usbnet" | "asix" | "cdc_ether" | "cdc_ncm"))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    modules.sort_unstable();
+    modules.dedup();
+    modules
+}
+
+fn parse_exact_lines(content: &str) -> Vec<String> {
+    let mut lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
 }
 
 #[cfg(target_os = "macos")]
@@ -319,10 +628,18 @@ mod tests {
         prepare_usb(&usb.0, SUPPORTED_FIRMWARE).expect("prepare payload");
         root.write(
             "jci/version.ini",
-            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\nJCI_SW_VER_PATCH=\"A\"\n",
+            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\r\nJCI_SW_VER_PATCH=\"A\"\r\n",
         );
         root.write("proc/version", b"Linux fixture\n");
         root.write("proc/cpuinfo", &vec![b'x'; 256 * 1024 + 4096]);
+        root.write(
+            "lib/modules/3.0.35/kernel/drivers/net/usb/asix.ko",
+            b"fixture module",
+        );
+        root.write(
+            "proc/net/dev",
+            b"Inter-| Receive | Transmit\n  lo: 0 0\neth0: 1 2\ncan0: 3 4\n",
+        );
         root.write("persistent/sentinel", b"unchanged");
 
         let output = Command::new("sh")
@@ -350,6 +667,18 @@ mod tests {
         let manifest = fs::read_to_string(report.join("manifest.tsv")).expect("read manifest");
         assert!(manifest.contains("proc/cpuinfo\ttruncated\t262144"));
         assert_eq!(
+            fs::read_to_string(report.join("usb-network-modules.txt"))
+                .expect("read USB network modules"),
+            "lib/modules/3.0.35/kernel/drivers/net/usb/asix.ko\n"
+        );
+        let analysis = analyze_report(&report).expect("analyze report");
+        assert_eq!(analysis.firmware, "74.00.324");
+        assert_eq!(
+            analysis.available_usb_network_drivers,
+            [UsbNetworkDriver::Asix]
+        );
+        assert_eq!(analysis.observed_non_vehicle_interfaces, ["eth0"]);
+        assert_eq!(
             fs::read(root.0.join("persistent/sentinel")).expect("read sentinel"),
             b"unchanged"
         );
@@ -372,5 +701,23 @@ mod tests {
 
         assert!(!output.status.success());
         assert!(!usb.0.join("mazda-cmu-report").exists());
+    }
+
+    #[test]
+    fn analyzer_refuses_incomplete_report() {
+        let report = TestDirectory::new("incomplete-report");
+        report.write(
+            "manifest.tsv",
+            b"mazda-cmu-report\t1\nsource\tstatus\tbytes\n",
+        );
+        report.write(
+            "firmware-version.ini",
+            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\n",
+        );
+
+        assert!(matches!(
+            analyze_report(&report.0),
+            Err(AnalyzeError::IncompleteReport)
+        ));
     }
 }

@@ -88,6 +88,20 @@ The report contains:
 - input, framebuffer, DRM, USB, and network-interface inventories;
 - process names and existing interface configuration.
 
+Back on the Mac, validate the report before reading individual files or making any transport
+decision:
+
+```bash
+cargo run --locked -p mazda-cmu-inspect -- \
+  analyze-report /Volumes/MAZDA_CMU/mazda-cmu-report
+```
+
+The analyzer requires the supported schema, final completion record, and exact firmware family. It
+reads only regular files, caps each input at 1 MiB, ignores failed observations when deriving
+capabilities, excludes CAN-family interface names, and reports whether the CMU actually contains an
+ASIX/CDC USB-network module and relevant BusyBox applets. It does not prepare another payload or
+change any CMU or Mac network state.
+
 Every file or command capture is capped at 256 KiB. The manifest records `ok`, `truncated`,
 `not_found`, `not_regular_file`, `permission_denied`, `io_error`, or `command_error` for each source.
 Missing sources are evidence about that firmware and are never a reason to elevate privileges.
