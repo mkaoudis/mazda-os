@@ -15,44 +15,24 @@ use std::path::Component;
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
-/// The only firmware family on which the USB launcher is currently allowed to run.
-pub const SUPPORTED_FIRMWARE: &str = "74.00.324A";
+/// The one owner-visible car/firmware confirmation accepted by the USB preparer.
+pub const TARGET_CONFIRMATION: &str = "cx5-2019.5-gt-70.00.100-na-n";
 
-/// A single, explicitly selected stock removable-media mount.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CmuMount {
-    Sda1,
-    Sdb1,
-}
+/// The exact owner-visible version expected on the target car's About screen.
+pub const TARGET_DISPLAY_VERSION: &str = "70.00.100 NA N";
 
-impl CmuMount {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Sda1 => "sda1",
-            Self::Sdb1 => "sdb1",
-        }
-    }
-}
+/// The normalized internal firmware identity accepted in a returned report.
+pub const SUPPORTED_FIRMWARE: &str = "70.00.100A-NA";
 
-impl std::str::FromStr for CmuMount {
-    type Err = ();
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "sda1" => Ok(Self::Sda1),
-            "sdb1" => Ok(Self::Sdb1),
-            _ => Err(()),
-        }
-    }
-}
+/// The software part number published for the NA 70.00.100A build.
+const SUPPORTED_SOFTWARE_PART_NUMBER: &str = "SWI10-24818-807R02";
 
 const COLLECTOR_FILE_NAME: &str = "cmu-inspect.sh";
 const UPDATE_FLAG_FILE_NAME: &str = "jci-autoupdate";
 const COLLECTOR: &[u8] = include_bytes!("../assets/cmu-inspect.sh");
 const MAX_REPORT_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_CAPTURE_BYTES: u64 = 256 * 1024;
-const REPORT_BUILD_ID: &str = "mazda-cmu-inspect-report-v2";
+const REPORT_BUILD_ID: &str = "mazda-cmu-inspect-70.00.100-na-report-v1";
 
 #[derive(Debug, Clone, Copy)]
 struct ObservationSpec {
@@ -60,7 +40,7 @@ struct ObservationSpec {
     file: &'static str,
 }
 
-const OBSERVATIONS: [ObservationSpec; 20] = [
+const OBSERVATIONS: [ObservationSpec; 17] = [
     ObservationSpec {
         source: "jci/version.ini",
         file: "firmware-version.ini",
@@ -108,18 +88,6 @@ const OBSERVATIONS: [ObservationSpec; 20] = [
     ObservationSpec {
         source: "proc/bus/input/devices",
         file: "input-devices.txt",
-    },
-    ObservationSpec {
-        source: "proc/net/dev",
-        file: "network-devices.txt",
-    },
-    ObservationSpec {
-        source: "proc/net/route",
-        file: "network-routes.txt",
-    },
-    ObservationSpec {
-        source: "proc/net/arp",
-        file: "network-arp.txt",
     },
     ObservationSpec {
         source: "proc/bus/usb/devices",
@@ -170,7 +138,7 @@ impl fmt::Display for PrepareError {
         match self {
             Self::UnsupportedFirmware => write!(
                 formatter,
-                "firmware must be explicitly confirmed as {SUPPORTED_FIRMWARE}"
+                "target must be explicitly confirmed as {TARGET_CONFIRMATION} ({TARGET_DISPLAY_VERSION})"
             ),
             Self::DestinationNotFound => write!(formatter, "destination does not exist"),
             Self::DestinationIsSymlink => {
@@ -227,9 +195,9 @@ impl std::error::Error for PrepareError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReportAnalysis {
     pub firmware: String,
+    pub software_part_number: String,
     pub available_usb_network_drivers: Vec<UsbNetworkDriver>,
     pub loaded_usb_network_modules: Vec<String>,
-    pub observed_interfaces: Vec<String>,
 }
 
 /// USB-network driver families relevant to a host-safe Mac transport.
@@ -308,7 +276,7 @@ impl fmt::Display for AnalyzeError {
             }
             Self::UnsupportedFirmware(firmware) => write!(
                 formatter,
-                "report is from unsupported firmware {firmware:?}, expected {SUPPORTED_FIRMWARE}"
+                "report is from unsupported firmware {firmware:?}, expected {SUPPORTED_FIRMWARE} with software part {SUPPORTED_SOFTWARE_PART_NUMBER}"
             ),
             Self::Io {
                 action,
@@ -330,19 +298,15 @@ impl std::error::Error for AnalyzeError {
 
 /// Writes the three-file report payload into an existing blank removable-media directory.
 ///
-/// `confirmed_firmware` must exactly match [`SUPPORTED_FIRMWARE`]. Existing files are never
+/// `confirmed_target` must exactly match [`TARGET_CONFIRMATION`]. Existing files are never
 /// overwritten, and a partial preparation is rolled back if a later file cannot be created.
 ///
 /// # Errors
 ///
 /// Returns an error when the firmware was not explicitly confirmed, the destination is unsafe or
 /// non-empty, or any payload file cannot be created and flushed.
-pub fn prepare_usb(
-    destination: &Path,
-    confirmed_firmware: &str,
-    cmu_mount: CmuMount,
-) -> Result<(), PrepareError> {
-    if confirmed_firmware != SUPPORTED_FIRMWARE {
+pub fn prepare_usb(destination: &Path, confirmed_target: &str) -> Result<(), PrepareError> {
+    if confirmed_target != TARGET_CONFIRMATION {
         return Err(PrepareError::UnsupportedFirmware);
     }
 
@@ -377,7 +341,7 @@ pub fn prepare_usb(
         }
     }
 
-    let launcher_file_name = launcher_file_name(cmu_mount);
+    let launcher_file_name = launcher_file_name();
     let payloads: [(&str, &[u8]); 3] = [
         (COLLECTOR_FILE_NAME, COLLECTOR),
         (UPDATE_FLAG_FILE_NAME, b"\n"),
@@ -457,14 +421,11 @@ fn verify_payload_file(
 ///
 /// This implementation is independently derived from ZDI's published filename-injection
 /// primitive. FAT disallows a literal `/`, so standard shell built-ins derive `/` by moving from
-/// `HOME` to its parent. Unlike community launchers, this names exactly one caller-selected mount
-/// and contains no mount-search loop or arbitrary command input.
+/// `HOME` to its parent. This target-specific launcher names only the documented first-drive mount
+/// and contains no mount selection, mount-search loop, or arbitrary command input.
 #[must_use]
-pub fn launcher_file_name(cmu_mount: CmuMount) -> String {
-    format!(
-        "$(R=$(cd ${{HOME}};cd ..;pwd);sh ${{R}}tmp${{R}}mnt${{R}}{}${{R}}cmu-inspect.sh).up",
-        cmu_mount.as_str()
-    )
+pub fn launcher_file_name() -> String {
+    "$(R=$(cd ${HOME};cd ..;pwd);sh ${R}tmp${R}mnt${R}sda1${R}cmu-inspect.sh).up".to_owned()
 }
 
 /// Validates and analyzes a completed `mazda-cmu-report` directory.
@@ -523,9 +484,13 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
     validate_report_entries(report_directory, &observations)?;
 
     let firmware_file = observation_text(&observations, 0)?;
-    let firmware = parse_firmware(firmware_file).ok_or(AnalyzeError::InvalidSchema)?;
-    if firmware != SUPPORTED_FIRMWARE {
-        return Err(AnalyzeError::UnsupportedFirmware(firmware));
+    let firmware_identity =
+        FirmwareIdentity::parse(firmware_file).ok_or(AnalyzeError::InvalidSchema)?;
+    let firmware = firmware_identity.normalized_firmware();
+    if !firmware_identity.is_supported() {
+        return Err(AnalyzeError::UnsupportedFirmware(
+            firmware_identity.description(),
+        ));
     }
 
     let kernel_release = observation_text(&observations, 1)?.trim();
@@ -538,10 +503,9 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
             "proc/sys/kernel/osrelease",
         ));
     }
-    let module_files = observation_text_or_empty(&observations, 19);
+    let module_files = observation_text_or_empty(&observations, 16);
     validate_module_file_list(module_files, kernel_release)?;
     let loaded_modules = observation_text_or_empty(&observations, 7);
-    let network_devices = observation_text_or_empty(&observations, 12);
 
     let mut available_usb_network_drivers = Vec::new();
     for (module, driver) in [
@@ -556,9 +520,9 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
 
     Ok(ReportAnalysis {
         firmware,
+        software_part_number: firmware_identity.software_part_number.to_owned(),
         available_usb_network_drivers,
         loaded_usb_network_modules: parse_loaded_usb_network_modules(loaded_modules),
-        observed_interfaces: parse_interfaces(network_devices),
     })
 }
 
@@ -739,26 +703,70 @@ fn read_report_file(path: &Path, name: &'static str) -> Result<Vec<u8>, AnalyzeE
     Ok(bytes)
 }
 
-fn parse_firmware(version_file: &str) -> Option<String> {
-    let base = version_file
-        .lines()
-        .find_map(|line| line.strip_prefix("JCI_SW_VER="))?
-        .trim_end_matches('\r')
-        .trim_matches('"');
-    let base = base.rsplit('_').next()?;
-    let patch = version_file
-        .lines()
-        .find_map(|line| line.strip_prefix("JCI_SW_VER_PATCH="))
-        .map(str::trim)
-        .map(|value| value.trim_end_matches('\r').trim_matches('"'))
-        .unwrap_or_default()
-        .to_ascii_uppercase();
+#[derive(Debug)]
+struct FirmwareIdentity<'a> {
+    version: String,
+    patch: String,
+    flavor: String,
+    software_part_number: &'a str,
+}
 
-    if base == "74.00.324A" && matches!(patch.as_str(), "" | "A") {
-        Some(SUPPORTED_FIRMWARE.to_owned())
-    } else {
-        Some(format!("{base}{patch}"))
+impl<'a> FirmwareIdentity<'a> {
+    fn parse(version_file: &'a str) -> Option<Self> {
+        let version = unique_quoted_ini_value(version_file, "JCI_SW_VER")?
+            .rsplit('_')
+            .next()?
+            .to_ascii_uppercase();
+        let patch = unique_quoted_ini_value(version_file, "JCI_SW_VER_PATCH")?.to_ascii_uppercase();
+        let flavor = unique_quoted_ini_value(version_file, "JCI_SW_FLAVOR")?
+            .rsplit('_')
+            .next()?
+            .to_ascii_uppercase();
+        let software_part_number = unique_quoted_ini_value(version_file, "JCI_SW_PART_NUMBER")?;
+
+        Some(Self {
+            version,
+            patch,
+            flavor,
+            software_part_number,
+        })
     }
+
+    fn is_supported(&self) -> bool {
+        matches!(self.version.as_str(), "70.00.100" | "70.00.100A")
+            && self.patch == "A"
+            && self.flavor == "NA"
+            && self.software_part_number == SUPPORTED_SOFTWARE_PART_NUMBER
+    }
+
+    fn normalized_firmware(&self) -> String {
+        let mut version = self.version.clone();
+        if !self.patch.is_empty() && !version.ends_with(&self.patch) {
+            version.push_str(&self.patch);
+        }
+        format!("{version}-{}", self.flavor)
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "{} (software part {})",
+            self.normalized_firmware(),
+            self.software_part_number
+        )
+    }
+}
+
+fn unique_quoted_ini_value<'a>(version_file: &'a str, key: &str) -> Option<&'a str> {
+    let mut values = version_file.lines().filter_map(|line| {
+        let line = line.trim_end_matches('\r');
+        let (candidate_key, value) = line.split_once('=')?;
+        (candidate_key == key).then_some(value)
+    });
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    value.strip_prefix('"')?.strip_suffix('"')
 }
 
 fn validate_module_file_list(module_files: &str, kernel_release: &str) -> Result<(), AnalyzeError> {
@@ -794,23 +802,6 @@ fn module_is_available(module_files: &str, loaded_modules: &str, module: &str) -
             .iter()
             .any(|candidate| file_name == candidate)
         })
-}
-
-fn parse_interfaces(network_devices: &str) -> Vec<String> {
-    let mut interfaces = network_devices
-        .lines()
-        .filter_map(|line| line.split_once(':').map(|(name, _)| name.trim()))
-        .filter(|name| {
-            !name.is_empty()
-                && name
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric() || "_.-".contains(character))
-        })
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    interfaces.sort_unstable();
-    interfaces.dedup();
-    interfaces
 }
 
 fn parse_loaded_usb_network_modules(loaded_modules: &str) -> Vec<String> {
@@ -941,6 +932,11 @@ mod tests {
 
     use super::*;
 
+    const TARGET_VERSION_INI: &[u8] = b"JCI_SW_VER=\"MAZ_CMU-150_70.00.100\"\r\n\
+JCI_SW_VER_PATCH=\"A\"\r\n\
+JCI_SW_FLAVOR=\"MAZ140_NA\"\r\n\
+JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
+
     struct TestDirectory(PathBuf);
 
     impl TestDirectory {
@@ -977,7 +973,7 @@ mod tests {
     fn prepares_exact_payload_without_overwriting() {
         let usb = TestDirectory::new("prepare");
 
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
+        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
 
         assert_eq!(
             fs::read(usb.0.join(COLLECTOR_FILE_NAME)).expect("read collector"),
@@ -987,10 +983,10 @@ mod tests {
             fs::read(usb.0.join(UPDATE_FLAG_FILE_NAME)).expect("read flag"),
             b"\n"
         );
-        let launcher = launcher_file_name(CmuMount::Sda1);
+        let launcher = launcher_file_name();
         assert!(usb.0.join(&launcher).is_file());
         assert!(matches!(
-            prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1),
+            prepare_usb(&usb.0, TARGET_CONFIRMATION),
             Err(PrepareError::DestinationNotEmpty(_))
         ));
     }
@@ -999,8 +995,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     fn prepared_entry_verification_reads_back_exact_payload_bytes() {
         let usb = TestDirectory::new("prepare-readback");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
-        let launcher = launcher_file_name(CmuMount::Sda1);
+        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        let launcher = launcher_file_name();
         let payloads: [(&str, &[u8]); 3] = [
             (COLLECTOR_FILE_NAME, COLLECTOR),
             (UPDATE_FLAG_FILE_NAME, b"\n"),
@@ -1020,7 +1016,7 @@ mod tests {
 
     #[test]
     fn launcher_name_is_a_single_valid_fat_component() {
-        let launcher = launcher_file_name(CmuMount::Sdb1);
+        let launcher = launcher_file_name();
         assert!(launcher.len() <= 255);
         assert!(!launcher.chars().any(|character| matches!(
             character,
@@ -1029,7 +1025,8 @@ mod tests {
         assert!(Path::new(&launcher)
             .extension()
             .is_some_and(|extension| extension.eq_ignore_ascii_case("up")));
-        assert!(launcher.contains("sdb1"));
+        assert!(launcher.contains("sda1"));
+        assert!(!launcher.contains("sdb1"));
         assert!(launcher.contains("cmu-inspect.sh"));
         assert!(!launcher.contains("for "));
         assert!(!launcher.contains("HOME%root"));
@@ -1070,13 +1067,52 @@ mod tests {
     }
 
     #[test]
-    fn refuses_unconfirmed_firmware_before_writing() {
+    fn refuses_unconfirmed_target_before_writing() {
         let usb = TestDirectory::new("firmware");
 
-        let result = prepare_usb(&usb.0, "70.00.100A", CmuMount::Sda1);
+        let result = prepare_usb(&usb.0, "cx5-2019.5-gt-74.00.324-na-n");
 
         assert!(matches!(result, Err(PrepareError::UnsupportedFirmware)));
         assert_eq!(fs::read_dir(&usb.0).expect("list USB").count(), 0);
+    }
+
+    #[test]
+    fn firmware_identity_requires_exact_na_build_metadata() {
+        let identity = FirmwareIdentity::parse(
+            std::str::from_utf8(TARGET_VERSION_INI).expect("fixture is UTF-8"),
+        )
+        .expect("parse target identity");
+        assert!(identity.is_supported());
+        assert_eq!(identity.normalized_firmware(), SUPPORTED_FIRMWARE);
+
+        let embedded_patch = std::str::from_utf8(TARGET_VERSION_INI)
+            .expect("fixture is UTF-8")
+            .replace("_70.00.100\"", "_70.00.100A\"");
+        assert!(FirmwareIdentity::parse(&embedded_patch)
+            .expect("parse embedded patch identity")
+            .is_supported());
+
+        for rejected in [
+            std::str::from_utf8(TARGET_VERSION_INI)
+                .expect("fixture is UTF-8")
+                .replace("MAZ140_NA", "MAZ140_EU"),
+            std::str::from_utf8(TARGET_VERSION_INI)
+                .expect("fixture is UTF-8")
+                .replace("SWI10-24818-807R02", "SWI10-24818-003R02"),
+            std::str::from_utf8(TARGET_VERSION_INI)
+                .expect("fixture is UTF-8")
+                .replace("JCI_SW_VER_PATCH=\"A\"", "JCI_SW_VER_PATCH=\"B\""),
+        ] {
+            assert!(!FirmwareIdentity::parse(&rejected)
+                .expect("parse non-target identity")
+                .is_supported());
+        }
+
+        let duplicate = format!(
+            "{}JCI_SW_FLAVOR=\"MAZ140_NA\"\n",
+            std::str::from_utf8(TARGET_VERSION_INI).expect("fixture is UTF-8")
+        );
+        assert!(FirmwareIdentity::parse(&duplicate).is_none());
     }
 
     #[test]
@@ -1084,11 +1120,8 @@ mod tests {
     fn collector_is_firmware_gated_bounded_and_usb_only() {
         let usb = TestDirectory::new("collector-usb");
         let root = TestDirectory::new("collector-root");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
-        root.write(
-            "jci/version.ini",
-            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\r\nJCI_SW_VER_PATCH=\"A\"\r\n",
-        );
+        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        root.write("jci/version.ini", TARGET_VERSION_INI);
         root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
         root.write("proc/version", b"Linux fixture\n");
         root.write("proc/cpuinfo", &vec![b'x'; 256 * 1024 + 4096]);
@@ -1103,10 +1136,6 @@ mod tests {
         root.write(
             "lib/modules/3.0.35/kernel/drivers/net/usb/unrelated.ko",
             b"unrelated fixture module",
-        );
-        root.write(
-            "proc/net/dev",
-            b"Inter-| Receive | Transmit\n  lo: 0 0\neth0: 1 2\ncan0: 3 4\n",
         );
         root.write("persistent/sentinel", b"unchanged");
 
@@ -1146,10 +1175,13 @@ mod tests {
         let analysis = analyze_report(&report).expect("analyze report");
         assert_eq!(analysis.firmware, SUPPORTED_FIRMWARE);
         assert_eq!(
+            analysis.software_part_number,
+            SUPPORTED_SOFTWARE_PART_NUMBER
+        );
+        assert_eq!(
             analysis.available_usb_network_drivers,
             [UsbNetworkDriver::Asix]
         );
-        assert_eq!(analysis.observed_interfaces, ["can0", "eth0", "lo"]);
         assert_eq!(
             fs::read(root.0.join("persistent/sentinel")).expect("read sentinel"),
             b"unchanged"
@@ -1161,8 +1193,14 @@ mod tests {
     fn collector_refuses_other_firmware_without_creating_report() {
         let usb = TestDirectory::new("refusal-usb");
         let root = TestDirectory::new("refusal-root");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
-        root.write("jci/version.ini", b"JCI_SW_VER=\"cmu150_NA_74.00.331\"\n");
+        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        root.write(
+            "jci/version.ini",
+            b"JCI_SW_VER=\"MAZ_CMU-150_74.00.324\"\n\
+JCI_SW_VER_PATCH=\"A\"\n\
+JCI_SW_FLAVOR=\"MAZ140_NA\"\n\
+JCI_SW_PART_NUMBER=\"SWI10-26479-118R02\"\n",
+        );
 
         let output = Command::new("sh")
             .arg(usb.0.join(COLLECTOR_FILE_NAME))
@@ -1181,10 +1219,13 @@ mod tests {
     fn collector_refuses_wrong_patch_without_creating_report() {
         let usb = TestDirectory::new("patch-refusal-usb");
         let root = TestDirectory::new("patch-refusal-root");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
+        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
         root.write(
             "jci/version.ini",
-            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\nJCI_SW_VER_PATCH=\"B\"\n",
+            b"JCI_SW_VER=\"MAZ_CMU-150_70.00.100\"\n\
+JCI_SW_VER_PATCH=\"B\"\n\
+JCI_SW_FLAVOR=\"MAZ140_NA\"\n\
+JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
         );
 
         let output = Command::new("sh")
@@ -1201,14 +1242,40 @@ mod tests {
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn collector_refuses_wrong_region_or_software_part_without_creating_report() {
+        let target = std::str::from_utf8(TARGET_VERSION_INI).expect("fixture is UTF-8");
+        for (label, version_ini) in [
+            ("wrong-region", target.replace("MAZ140_NA", "MAZ140_EU")),
+            (
+                "wrong-part",
+                target.replace("SWI10-24818-807R02", "SWI10-24818-003R02"),
+            ),
+        ] {
+            let usb = TestDirectory::new(label);
+            let root = TestDirectory::new(label);
+            prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+            root.write("jci/version.ini", version_ini.as_bytes());
+
+            let output = Command::new("sh")
+                .arg(usb.0.join(COLLECTOR_FILE_NAME))
+                .env("MAZDA_CMU_INSPECT_TESTING", "1")
+                .env("MAZDA_CMU_INSPECT_TEST_ROOT", &root.0)
+                .env("MAZDA_CMU_INSPECT_TEST_USB", &usb.0)
+                .output()
+                .expect("run collector");
+
+            assert!(!output.status.success());
+            assert!(!usb.0.join("mazda-cmu-report").exists());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn collector_records_timeouts_without_leaving_partial_files() {
         let usb = TestDirectory::new("timeout-usb");
         let root = TestDirectory::new("timeout-root");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
-        root.write(
-            "jci/version.ini",
-            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\nJCI_SW_VER_PATCH=\"A\"\n",
-        );
+        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        root.write("jci/version.ini", TARGET_VERSION_INI);
         root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
 
         let output = Command::new("sh")
@@ -1245,11 +1312,8 @@ mod tests {
     fn analyzer_refuses_incomplete_report() {
         let usb = TestDirectory::new("incomplete-usb");
         let root = TestDirectory::new("incomplete-root");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
-        root.write(
-            "jci/version.ini",
-            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\nJCI_SW_VER_PATCH=\"A\"\n",
-        );
+        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        root.write("jci/version.ini", TARGET_VERSION_INI);
         root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
         let output = Command::new("sh")
             .arg(usb.0.join(COLLECTOR_FILE_NAME))
@@ -1279,11 +1343,8 @@ mod tests {
     fn analyzer_rejects_tampering_duplicate_rows_and_extra_files() {
         let usb = TestDirectory::new("tamper-usb");
         let root = TestDirectory::new("tamper-root");
-        prepare_usb(&usb.0, SUPPORTED_FIRMWARE, CmuMount::Sda1).expect("prepare payload");
-        root.write(
-            "jci/version.ini",
-            b"JCI_SW_VER=\"cmu150_NA_74.00.324\"\nJCI_SW_VER_PATCH=\"A\"\n",
-        );
+        prepare_usb(&usb.0, TARGET_CONFIRMATION).expect("prepare payload");
+        root.write("jci/version.ini", TARGET_VERSION_INI);
         root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
         let output = Command::new("sh")
             .arg(usb.0.join(COLLECTOR_FILE_NAME))

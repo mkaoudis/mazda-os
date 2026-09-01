@@ -1,5 +1,5 @@
 #!/bin/sh
-# Report-only Mazda Connect Gen-6.5 collector for firmware 74.00.324A.
+# Report-only collector for one 2019.5 Mazda CX-5 GT on 70.00.100 NA N.
 #
 # This script writes only a new report directory on the removable USB filesystem. It does not
 # remount, reboot, persist, configure networking, change services, load modules, or access VIP,
@@ -9,7 +9,7 @@ PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export PATH
 umask 077
 
-REPORT_BUILD_ID=mazda-cmu-inspect-report-v2
+REPORT_BUILD_ID=mazda-cmu-inspect-70.00.100-na-report-v1
 MAX_BYTES=262144
 BLOCK_SIZE=4096
 BLOCKS_WITH_SENTINEL=65
@@ -28,7 +28,7 @@ if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
 else
     CMU_ROOT=
     case "$0" in
-        /tmp/mnt/sda1/cmu-inspect.sh|/tmp/mnt/sdb1/cmu-inspect.sh) USB_ROOT=${0%/*} ;;
+        /tmp/mnt/sda1/cmu-inspect.sh) USB_ROOT=${0%/*} ;;
         *) exit 64 ;;
     esac
     [ -d /jci ] || exit 65
@@ -39,8 +39,14 @@ fi
 VERSION_PATH="${CMU_ROOT}/jci/version.ini"
 [ -r "$VERSION_PATH" ] && [ -f "$VERSION_PATH" ] || exit 66
 
-FIRMWARE_BASE=
+FIRMWARE_VERSION=
 FIRMWARE_PATCH=
+FIRMWARE_FLAVOR=
+SOFTWARE_PART_NUMBER=
+SEEN_SW_VER=0
+SEEN_SW_VER_PATCH=0
+SEEN_SW_FLAVOR=0
+SEEN_SW_PART_NUMBER=0
 CR=$(printf '\r')
 while IFS= read -r version_line; do
     case "$version_line" in
@@ -48,22 +54,50 @@ while IFS= read -r version_line; do
     esac
     case "$version_line" in
         JCI_SW_VER=*)
+            [ "$SEEN_SW_VER" -eq 0 ] || exit 67
+            SEEN_SW_VER=1
             value=${version_line#*=}
-            value=${value#\"}
-            value=${value%\"}
-            FIRMWARE_BASE=${value##*_}
+            case "$value" in
+                \"*\") value=${value#\"}; value=${value%\"} ;;
+                *) exit 67 ;;
+            esac
+            FIRMWARE_VERSION=${value##*_}
             ;;
         JCI_SW_VER_PATCH=*)
+            [ "$SEEN_SW_VER_PATCH" -eq 0 ] || exit 67
+            SEEN_SW_VER_PATCH=1
             value=${version_line#*=}
-            value=${value#\"}
-            value=${value%\"}
+            case "$value" in
+                \"*\") value=${value#\"}; value=${value%\"} ;;
+                *) exit 67 ;;
+            esac
             FIRMWARE_PATCH=$value
+            ;;
+        JCI_SW_FLAVOR=*)
+            [ "$SEEN_SW_FLAVOR" -eq 0 ] || exit 67
+            SEEN_SW_FLAVOR=1
+            value=${version_line#*=}
+            case "$value" in
+                \"*\") value=${value#\"}; value=${value%\"} ;;
+                *) exit 67 ;;
+            esac
+            FIRMWARE_FLAVOR=${value##*_}
+            ;;
+        JCI_SW_PART_NUMBER=*)
+            [ "$SEEN_SW_PART_NUMBER" -eq 0 ] || exit 67
+            SEEN_SW_PART_NUMBER=1
+            value=${version_line#*=}
+            case "$value" in
+                \"*\") value=${value#\"}; value=${value%\"} ;;
+                *) exit 67 ;;
+            esac
+            SOFTWARE_PART_NUMBER=$value
             ;;
     esac
 done <"$VERSION_PATH"
 
-case "$FIRMWARE_BASE:$FIRMWARE_PATCH" in
-    74.00.324:A|74.00.324:a|74.00.324A:|74.00.324A:A|74.00.324A:a) ;;
+case "$SEEN_SW_VER:$SEEN_SW_VER_PATCH:$SEEN_SW_FLAVOR:$SEEN_SW_PART_NUMBER:$FIRMWARE_VERSION:$FIRMWARE_PATCH:$FIRMWARE_FLAVOR:$SOFTWARE_PART_NUMBER" in
+    1:1:1:1:70.00.100:A:NA:SWI10-24818-807R02|1:1:1:1:70.00.100A:A:NA:SWI10-24818-807R02) ;;
     *) exit 67 ;;
 esac
 
@@ -275,9 +309,6 @@ capture_file proc/config.gz kernel-config.gz
 capture_file proc/partitions partitions.txt
 capture_file proc/mtd mtd.txt
 capture_file proc/bus/input/devices input-devices.txt
-capture_file proc/net/dev network-devices.txt
-capture_file proc/net/route network-routes.txt
-capture_file proc/net/arp network-arp.txt
 capture_file proc/bus/usb/devices usb-devices.txt
 capture_file sys/class/graphics/fb0/name framebuffer-name.txt
 capture_file sys/class/graphics/fb0/modes framebuffer-modes.txt

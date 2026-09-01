@@ -3,12 +3,13 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use mazda_cmu_inspect::{
-    analyze_report, prepare_usb, CmuMount, ReportAnalysis, UsbNetworkDriver, SUPPORTED_FIRMWARE,
+    analyze_report, prepare_usb, ReportAnalysis, UsbNetworkDriver, TARGET_CONFIRMATION,
+    TARGET_DISPLAY_VERSION,
 };
 
 fn usage() {
     eprintln!(
-        "Usage:\n  mazda-cmu-inspect prepare-usb --firmware {SUPPORTED_FIRMWARE} --cmu-mount sda1|sdb1 /Volumes/<drive>\n  mazda-cmu-inspect analyze-report /Volumes/<drive>/mazda-cmu-report"
+        "Usage:\n  mazda-cmu-inspect prepare-usb --target {TARGET_CONFIRMATION} /Volumes/<drive>\n  mazda-cmu-inspect analyze-report /Volumes/<drive>/mazda-cmu-report\n\nTarget: 2019.5 Mazda CX-5 GT with display version {TARGET_DISPLAY_VERSION}"
     );
 }
 
@@ -25,26 +26,23 @@ fn main() -> ExitCode {
         }
     }
 
-    let [command, firmware_flag, firmware, mount_flag, mount, destination] = arguments.as_slice()
-    else {
+    let [command, target_flag, target, destination] = arguments.as_slice() else {
         usage();
         return ExitCode::from(64);
     };
-    if command != "prepare-usb" || firmware_flag != "--firmware" || mount_flag != "--cmu-mount" {
+    if command != "prepare-usb" || target_flag != "--target" {
         usage();
         return ExitCode::from(64);
     }
-    let Ok(cmu_mount) = mount.parse::<CmuMount>() else {
-        eprintln!("CMU mount must be exactly sda1 or sdb1");
-        return ExitCode::from(64);
-    };
 
-    if let Err(error) = prepare_usb(Path::new(destination), firmware, cmu_mount) {
+    if let Err(error) = prepare_usb(Path::new(destination), target) {
         eprintln!("could not prepare CMU inspection USB: {error}");
         return ExitCode::FAILURE;
     }
 
-    println!("Prepared report-only CMU payload for {SUPPORTED_FIRMWARE} at {destination}");
+    println!(
+        "Prepared report-only CMU payload for 2019.5 CX-5 GT / {TARGET_DISPLAY_VERSION} at {destination}"
+    );
     ExitCode::SUCCESS
 }
 
@@ -63,6 +61,10 @@ fn analyze(report_directory: &Path) -> ExitCode {
 
 fn print_analysis(analysis: &ReportAnalysis) {
     println!("Firmware: {} (supported)", analysis.firmware);
+    println!(
+        "Software part: {} (supported)",
+        analysis.software_part_number
+    );
     println!(
         "USB-network drivers available: {}",
         if analysis.available_usb_network_drivers.is_empty() {
@@ -86,14 +88,6 @@ fn print_analysis(analysis: &ReportAnalysis) {
             "none".to_owned()
         } else {
             analysis.loaded_usb_network_modules.join(", ")
-        }
-    );
-    println!(
-        "Observed interfaces (unclassified): {}",
-        if analysis.observed_interfaces.is_empty() {
-            "none".to_owned()
-        } else {
-            analysis.observed_interfaces.join(", ")
         }
     );
     println!(
