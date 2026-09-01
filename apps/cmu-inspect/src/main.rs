@@ -89,23 +89,18 @@ fn print_analysis(analysis: &ReportAnalysis) {
         }
     );
     println!(
-        "Observed non-vehicle interfaces: {}",
-        if analysis.observed_non_vehicle_interfaces.is_empty() {
+        "Observed interfaces (unclassified): {}",
+        if analysis.observed_interfaces.is_empty() {
             "none".to_owned()
         } else {
-            analysis.observed_non_vehicle_interfaces.join(", ")
+            analysis.observed_interfaces.join(", ")
         }
     );
     println!(
-        "BusyBox httpd available: {}",
-        analysis.has_busybox_applet("httpd")
+        "USB-network compatibility evidence present: {}",
+        analysis.has_usb_network_compatibility_evidence()
     );
     println!(
-        "BusyBox nc available: {}",
-        analysis.has_busybox_applet("nc")
-    );
-    println!(
-        "Passive USB-Ethernet probe supported by report: {}",
-        analysis.supports_passive_adapter_probe()
+        "Hardware insertion is not authorized by this report; USB hotplug can change CMU state."
     );
 }

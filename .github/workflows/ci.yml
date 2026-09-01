@@ -21,3 +21,15 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+
+  macos-cmu-inspect:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Check macOS media validation
+        run: cargo clippy -p mazda-cmu-inspect --all-targets --locked -- -D warnings
+      - name: Test macOS media validation
+        run: cargo test -p mazda-cmu-inspect --locked
