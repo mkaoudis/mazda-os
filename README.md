@@ -24,10 +24,11 @@ An experimental, open-source infotainment UI and runtime for first-generation Ma
 
 ```text
 apps/
-  desktop/       Desktop smoke-test application
+  desktop/       800×480 desktop simulator
 crates/
   mazda-core/    Read-only domain model and platform capability boundary
   mazda-mock/    Deterministic development backend
+  mazda-ui/      Platform-neutral UI model, renderer trait, software framebuffer
 docs/
   ARCHITECTURE.md
   ROADMAP.md
@@ -51,18 +52,35 @@ docs/
 
 The application layer never receives a raw D-Bus connection, CAN socket, SPI device, `/dev/mem`, or shell-execution capability.
 
-## Run the scaffold
+The UI also sits behind a deliberately small `Renderer` trait. The desktop implementation renders to a software framebuffer; the intended CMU implementation can later render the same UI through EGL/OpenGL ES without changing application behavior.
+
+## Run the simulator
 
 ```bash
 cargo run -p mazda-desktop
-cargo test --workspace
 ```
 
-The first milestone is intentionally not graphical: establish the capability boundary and deterministic simulator first, then add the rendering stack behind that boundary.
+The window is the factory display resolution: **800×480**. Keyboard controls emulate the Commander input:
+
+- Arrow keys: rotate Commander knob
+- Enter / Space: select
+- Backspace: cancel a pending menu selection
+- H / M: Home or Music → Now Playing
+- N: Navigation → Drive
+- F: Favorites → Settings
+- Escape: quit
+
+Run verification with:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
 
 ## Status
 
-Very early research/scaffolding. No code in this repository should be assumed safe for installation in a vehicle yet.
+Phase 1 desktop simulator. No code in this repository should be assumed safe for installation in a vehicle yet.
 
 ## Disclaimer
 

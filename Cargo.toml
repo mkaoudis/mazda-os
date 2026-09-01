@@ -3,6 +3,7 @@ members = [
     "apps/desktop",
     "crates/mazda-core",
     "crates/mazda-mock",
+    "crates/mazda-ui",
 ]
 resolver = "2"
 
