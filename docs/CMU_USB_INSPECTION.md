@@ -80,11 +80,17 @@ letter is a stop condition.
 anything. `analyze-report` remains cross-platform.
 
 Use Disk Utility to erase a dedicated drive as FAT32 with an MBR partition map. The preparer uses
-`diskutil` to require FAT32 rather than FAT16, removable media, and
-`FDisk_partition_scheme`. It also requires the mounted volume root under `/Volumes`, refuses
-existing non-metadata content, creates new files without overwriting, and reads every payload file
-back byte-for-byte. If an AppleDouble sidecar, unrelated `.up`, or any unexpected entry appears,
-the three files it created are rolled back.
+`diskutil` to require FAT32 rather than FAT16, removable media, `FDisk_partition_scheme`, and one
+partition only: the selected volume must be the parent disk's `s1`. It also requires the mounted
+volume root under `/Volumes`, refuses existing non-metadata content, creates new files without
+overwriting, and reads every payload file back byte-for-byte.
+
+The collector and marker are written and verified first. The launcher is then verified under an
+inert staging name, and the active `.up` name is created only by the final atomic rename. After any
+preparation failure, cleanup removes all payload and matching AppleDouble names and re-lists the
+volume. The ordinary preparation error is returned only if that cleanup is verified. Otherwise the
+tool emits: **“Media may contain an active launcher; do not insert it into the vehicle. Reformat the
+entire device.”** Treat that warning literally; do not inspect the suspect drive in the car.
 
 Run:
 

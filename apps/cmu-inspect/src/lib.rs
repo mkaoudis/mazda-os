@@ -36,6 +36,8 @@ const COLLECTOR_FILE_NAME: &str = "cmu-inspect.sh";
 #[cfg(any(target_os = "macos", test))]
 const UPDATE_FLAG_FILE_NAME: &str = "jci-autoupdate";
 #[cfg(any(target_os = "macos", test))]
+const STAGED_LAUNCHER_FILE_NAME: &str = ".cmu-launcher-stage";
+#[cfg(any(target_os = "macos", test))]
 const COLLECTOR: &[u8] = include_bytes!("../assets/cmu-inspect.sh");
 const MAX_REPORT_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_CAPTURE_BYTES: u64 = 256 * 1024;
@@ -137,6 +139,7 @@ pub enum PrepareError {
     DestinationNotEmpty(String),
     UnexpectedPostWriteEntry(String),
     PreparedPayloadMismatch(String),
+    UnsafeMediaAfterFailedCleanup(Vec<String>),
     Io {
         action: &'static str,
         path: PathBuf,
@@ -194,11 +197,16 @@ impl fmt::Display for PrepareError {
             ),
             Self::UnexpectedPostWriteEntry(name) => write!(
                 formatter,
-                "unexpected entry {name:?} appeared while preparing the drive; payload was rolled back"
+                "unexpected entry {name:?} appeared while preparing the drive"
             ),
             Self::PreparedPayloadMismatch(name) => write!(
                 formatter,
-                "prepared payload file {name:?} did not match the intended bytes; payload was rolled back"
+                "prepared payload file {name:?} did not match the intended bytes"
+            ),
+            Self::UnsafeMediaAfterFailedCleanup(details) => write!(
+                formatter,
+                "Media may contain an active launcher; do not insert it into the vehicle. Reformat the entire device. Cleanup could not be verified: {}",
+                details.join("; ")
             ),
             Self::Io {
                 action,
@@ -326,7 +334,8 @@ impl std::error::Error for AnalyzeError {
 /// Writes the three-file report payload into an existing blank removable-media directory.
 ///
 /// `confirmed_target` must exactly match [`TARGET_CONFIRMATION`]. Existing files are never
-/// overwritten, and a partial preparation is rolled back if a later file cannot be created.
+/// overwritten. The active launcher name is installed only by the final atomic rename. If a later
+/// validation fails, the original error is returned only after cleanup is verified.
 ///
 /// # Errors
 ///
@@ -354,6 +363,52 @@ pub fn prepare_usb(_destination: &Path, _confirmed_target: &str) -> Result<(), P
 
 #[cfg(any(target_os = "macos", test))]
 fn prepare_payload_files(destination: &Path) -> Result<(), PrepareError> {
+    validate_payload_destination(destination)?;
+
+    let active_launcher_name = launcher_file_name();
+    let safe_payloads: [(&str, &[u8]); 2] = [
+        (COLLECTOR_FILE_NAME, COLLECTOR),
+        (UPDATE_FLAG_FILE_NAME, b"\n"),
+    ];
+    for &(name, content) in &safe_payloads {
+        let path = destination.join(name);
+        if let Err(error) = create_new_file(&path, content) {
+            let preparation_error = io_error("create payload file", &path, error);
+            return Err(error_after_verified_cleanup(
+                destination,
+                &active_launcher_name,
+                preparation_error,
+            ));
+        }
+        if let Err(error) = verify_payload_file(destination, name, content) {
+            return Err(error_after_verified_cleanup(
+                destination,
+                &active_launcher_name,
+                error,
+            ));
+        }
+    }
+
+    prepare_staged_launcher(destination, &active_launcher_name)?;
+
+    let active_payloads: [(&str, &[u8]); 3] = [
+        (COLLECTOR_FILE_NAME, COLLECTOR),
+        (UPDATE_FLAG_FILE_NAME, b"\n"),
+        (&active_launcher_name, b"\n"),
+    ];
+    if let Err(error) = verify_prepared_entries(destination, &active_payloads) {
+        return Err(error_after_verified_cleanup(
+            destination,
+            &active_launcher_name,
+            error,
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn validate_payload_destination(destination: &Path) -> Result<(), PrepareError> {
     let metadata = fs::symlink_metadata(destination).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             PrepareError::DestinationNotFound
@@ -382,27 +437,54 @@ fn prepare_payload_files(destination: &Path) -> Result<(), PrepareError> {
         }
     }
 
-    let launcher_file_name = launcher_file_name();
-    let payloads: [(&str, &[u8]); 3] = [
-        (COLLECTOR_FILE_NAME, COLLECTOR),
-        (UPDATE_FLAG_FILE_NAME, b"\n"),
-        (&launcher_file_name, b"\n"),
-    ];
-    let mut created = Vec::with_capacity(payloads.len());
+    Ok(())
+}
 
-    for &(name, content) in &payloads {
-        let path = destination.join(name);
-        if let Err(error) = create_new_file(&path, content) {
-            let _ = fs::remove_file(&path);
-            rollback_created_files(&created);
-            return Err(io_error("create payload file", &path, error));
-        }
-        created.push(path);
+#[cfg(any(target_os = "macos", test))]
+fn prepare_staged_launcher(
+    destination: &Path,
+    active_launcher_name: &str,
+) -> Result<(), PrepareError> {
+    let staged_launcher_path = destination.join(STAGED_LAUNCHER_FILE_NAME);
+    if let Err(error) = create_new_file(&staged_launcher_path, b"\n") {
+        let preparation_error =
+            io_error("create inert launcher stage", &staged_launcher_path, error);
+        return Err(error_after_verified_cleanup(
+            destination,
+            active_launcher_name,
+            preparation_error,
+        ));
+    }
+    if let Err(error) = verify_payload_file(destination, STAGED_LAUNCHER_FILE_NAME, b"\n") {
+        return Err(error_after_verified_cleanup(
+            destination,
+            active_launcher_name,
+            error,
+        ));
     }
 
-    if let Err(error) = verify_prepared_entries(destination, &payloads) {
-        rollback_created_files(&created);
-        return Err(error);
+    let staged_payloads: [(&str, &[u8]); 3] = [
+        (COLLECTOR_FILE_NAME, COLLECTOR),
+        (UPDATE_FLAG_FILE_NAME, b"\n"),
+        (STAGED_LAUNCHER_FILE_NAME, b"\n"),
+    ];
+    if let Err(error) = verify_prepared_entries(destination, &staged_payloads) {
+        return Err(error_after_verified_cleanup(
+            destination,
+            active_launcher_name,
+            error,
+        ));
+    }
+
+    let active_launcher_path = destination.join(active_launcher_name);
+    if let Err(error) = fs::rename(&staged_launcher_path, &active_launcher_path) {
+        let preparation_error =
+            io_error("atomically activate launcher", &active_launcher_path, error);
+        return Err(error_after_verified_cleanup(
+            destination,
+            active_launcher_name,
+            preparation_error,
+        ));
     }
 
     Ok(())
@@ -577,10 +659,80 @@ fn create_new_file(path: &Path, content: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn rollback_created_files(created: &[PathBuf]) {
-    for path in created.iter().rev() {
-        let _ = fs::remove_file(path);
+fn error_after_verified_cleanup(
+    destination: &Path,
+    active_launcher_name: &str,
+    preparation_error: PrepareError,
+) -> PrepareError {
+    match remove_and_verify_payload_absence(destination, active_launcher_name) {
+        Ok(()) => preparation_error,
+        Err(cleanup_error) => cleanup_error,
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn remove_and_verify_payload_absence(
+    destination: &Path,
+    active_launcher_name: &str,
+) -> Result<(), PrepareError> {
+    let payload_names = cleanup_payload_names(active_launcher_name);
+    let mut failures = Vec::new();
+
+    for name in payload_names.iter().rev() {
+        let path = destination.join(name);
+        if let Err(error) = fs::remove_file(&path) {
+            if error.kind() != io::ErrorKind::NotFound {
+                failures.push(format!("could not remove {}: {error}", path.display()));
+            }
+        }
+    }
+
+    match fs::read_dir(destination) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) => {
+                        if payload_names
+                            .iter()
+                            .any(|name| entry.file_name() == OsStr::new(name))
+                        {
+                            failures
+                                .push(format!("payload name remains: {}", entry.path().display()));
+                        }
+                    }
+                    Err(error) => failures.push(format!(
+                        "could not inspect an entry while verifying cleanup: {error}"
+                    )),
+                }
+            }
+        }
+        Err(error) => failures.push(format!(
+            "could not re-list {} after cleanup: {error}",
+            destination.display()
+        )),
+    }
+
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(PrepareError::UnsafeMediaAfterFailedCleanup(failures))
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn cleanup_payload_names(active_launcher_name: &str) -> Vec<String> {
+    let base_names = [
+        COLLECTOR_FILE_NAME,
+        UPDATE_FLAG_FILE_NAME,
+        STAGED_LAUNCHER_FILE_NAME,
+        active_launcher_name,
+    ];
+    let mut names = Vec::with_capacity(base_names.len() * 2);
+    for name in base_names {
+        names.push(name.to_owned());
+        names.push(format!("._{name}"));
+    }
+    names
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1098,6 +1250,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         );
         let launcher = launcher_file_name();
         assert!(usb.0.join(&launcher).is_file());
+        assert!(!usb.0.join(STAGED_LAUNCHER_FILE_NAME).exists());
         assert!(matches!(
             prepare_payload_files(&usb.0),
             Err(PrepareError::DestinationNotEmpty(_))
@@ -1125,6 +1278,40 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         fs::write(usb.0.join(UPDATE_FLAG_FILE_NAME), b"\n").expect("restore prepared flag");
         fs::remove_file(usb.0.join(COLLECTOR_FILE_NAME)).expect("remove prepared collector");
         assert!(verify_prepared_entries(&usb.0, &payloads).is_err());
+    }
+
+    #[test]
+    fn cleanup_removes_and_verifies_every_payload_name() {
+        let usb = TestDirectory::new("cleanup");
+        let launcher = launcher_file_name();
+        let names = cleanup_payload_names(&launcher);
+        for name in &names {
+            fs::write(usb.0.join(name), b"fixture").expect("write cleanup fixture");
+        }
+
+        remove_and_verify_payload_absence(&usb.0, &launcher).expect("verify cleanup");
+
+        assert!(names.iter().all(|name| !usb.0.join(name).exists()));
+    }
+
+    #[test]
+    fn cleanup_failure_returns_explicit_unsafe_media_error() {
+        let usb = TestDirectory::new("cleanup-failure");
+        let launcher = launcher_file_name();
+        fs::create_dir(usb.0.join(&launcher)).expect("create undeletable-as-file launcher fixture");
+
+        let error = remove_and_verify_payload_absence(&usb.0, &launcher)
+            .expect_err("directory at launcher name must fail cleanup");
+        let message = error.to_string();
+
+        assert!(matches!(
+            error,
+            PrepareError::UnsafeMediaAfterFailedCleanup(_)
+        ));
+        assert!(message.contains(
+            "Media may contain an active launcher; do not insert it into the vehicle. Reformat the entire device."
+        ));
+        assert!(usb.0.join(&launcher).exists());
     }
 
     #[test]
