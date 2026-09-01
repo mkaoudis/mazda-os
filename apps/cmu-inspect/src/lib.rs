@@ -957,6 +957,7 @@ mod tests {
             Self(path)
         }
 
+        #[cfg(target_os = "linux")]
         fn write(&self, relative: &str, content: &[u8]) {
             let path = self.0.join(relative);
             fs::create_dir_all(path.parent().expect("fixture has a parent"))
