@@ -1225,6 +1225,16 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
                 .expect("create fixture parent");
             fs::write(path, content).expect("write fixture");
         }
+
+        fn assert_no_firmware_gate_copy(&self) {
+            assert!(fs::read_dir(&self.0).expect("list USB root").all(|entry| {
+                !entry
+                    .expect("read USB root entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".cmu-version-gate.")
+            }));
+        }
     }
 
     impl Drop for TestDirectory {
@@ -1495,6 +1505,47 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     }
 
     #[test]
+    fn collector_bounds_firmware_gate_before_parsing() {
+        let collector = std::str::from_utf8(COLLECTOR).expect("collector is UTF-8");
+        let applet_validation = collector
+            .find("cksum /dev/null")
+            .expect("collector validates cksum");
+        let bounded_gate = collector
+            .find("bounded_copy \"$VERSION_PATH\" \"$VERSION_GATE_COPY\" \"$BLOCKS_WITHOUT_SENTINEL\"")
+            .expect("collector bounded-copies firmware identity");
+        let parse_gate = collector
+            .find("done <\"$VERSION_GATE_COPY\"")
+            .expect("collector parses bounded firmware copy");
+
+        assert!(applet_validation < bounded_gate);
+        assert!(bounded_gate < parse_gate);
+        assert!(!collector.contains("done <\"$VERSION_PATH\""));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn collector_does_not_search_past_firmware_gate_bound() {
+        let usb = TestDirectory::new("bounded-gate-usb");
+        let root = TestDirectory::new("bounded-gate-root");
+        prepare_payload_files(&usb.0).expect("prepare payload");
+        let mut version_ini = vec![b'x'; usize::try_from(MAX_CAPTURE_BYTES).expect("size fits")];
+        version_ini.extend_from_slice(TARGET_VERSION_INI);
+        root.write("jci/version.ini", &version_ini);
+
+        let output = Command::new("sh")
+            .arg(usb.0.join(COLLECTOR_FILE_NAME))
+            .env("MAZDA_CMU_INSPECT_TESTING", "1")
+            .env("MAZDA_CMU_INSPECT_TEST_ROOT", &root.0)
+            .env("MAZDA_CMU_INSPECT_TEST_USB", &usb.0)
+            .output()
+            .expect("run collector");
+
+        assert!(!output.status.success());
+        assert!(!usb.0.join("mazda-cmu-report").exists());
+        usb.assert_no_firmware_gate_copy();
+    }
+
+    #[test]
     #[cfg(target_os = "linux")]
     fn collector_is_firmware_gated_bounded_and_usb_only() {
         let usb = TestDirectory::new("collector-usb");
@@ -1565,6 +1616,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             fs::read(root.0.join("persistent/sentinel")).expect("read sentinel"),
             b"unchanged"
         );
+        usb.assert_no_firmware_gate_copy();
     }
 
     #[test]
@@ -1591,6 +1643,7 @@ JCI_SW_PART_NUMBER=\"SWI10-26479-118R02\"\n",
 
         assert!(!output.status.success());
         assert!(!usb.0.join("mazda-cmu-report").exists());
+        usb.assert_no_firmware_gate_copy();
     }
 
     #[test]
@@ -1617,6 +1670,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
 
         assert!(!output.status.success());
         assert!(!usb.0.join("mazda-cmu-report").exists());
+        usb.assert_no_firmware_gate_copy();
     }
 
     #[test]
@@ -1664,6 +1718,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
 
             assert!(!output.status.success());
             assert!(!usb.0.join("mazda-cmu-report").exists());
+            usb.assert_no_firmware_gate_copy();
         }
     }
 

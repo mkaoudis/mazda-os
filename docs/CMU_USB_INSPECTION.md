@@ -138,6 +138,11 @@ BusyBox 1.19-compatible `timeout -t SECS -s KILL` form. If the CMU lacks the req
 `dd`, or `cksum` applet, the payload fails closed. It does not substitute an unbounded command.
 Open-ended commands such as `ps`, `df`, `ifconfig`, and `busybox --list` are not run.
 
+The applets and timeout form are validated before firmware data is read. The firmware gate copies
+at most 256 KiB of `/jci/version.ini`, under the same five-second timeout, to a temporary file on
+the USB drive and parses only that copy. The temporary gate file is deleted before either an
+unsupported-identity exit or report creation.
+
 A completed report has:
 
 - `manifest.tsv` using schema 2 and build ID

@@ -15,11 +15,13 @@ BLOCK_SIZE=4096
 BLOCKS_WITH_SENTINEL=65
 BLOCKS_WITHOUT_SENTINEL=64
 READ_TIMEOUT_SECONDS=5
+GATE_TIMEOUT_SECONDS=5
 
 if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
     CMU_ROOT=${MAZDA_CMU_INSPECT_TEST_ROOT:-}
     USB_ROOT=${MAZDA_CMU_INSPECT_TEST_USB:-}
     READ_TIMEOUT_SECONDS=${MAZDA_CMU_INSPECT_TEST_TIMEOUT_SECONDS:-5}
+    GATE_TIMEOUT_SECONDS=${MAZDA_CMU_INSPECT_TEST_GATE_TIMEOUT_SECONDS:-5}
     [ -n "$CMU_ROOT" ] && [ -n "$USB_ROOT" ] || exit 64
     TIMEOUT_PROGRAM=$(command -v timeout 2>/dev/null)
     DD_PROGRAM=$(command -v dd 2>/dev/null)
@@ -36,8 +38,48 @@ else
     [ -x "$BUSYBOX" ] || exit 68
 fi
 
+if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" != "1" ]; then
+    "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" true >/dev/null 2>&1 || exit 68
+    "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" dd if=/dev/null of=/dev/null \
+        bs=1 count=1 >/dev/null 2>&1 || exit 68
+    "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" cksum /dev/null \
+        >/dev/null 2>&1 || exit 68
+fi
+
+bounded_copy() {
+    copy_source=$1
+    copy_destination=$2
+    copy_blocks=$3
+    copy_timeout_seconds=${4:-$READ_TIMEOUT_SECONDS}
+    if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
+        "$TIMEOUT_PROGRAM" "$copy_timeout_seconds" "$DD_PROGRAM" \
+            if="$copy_source" of="$copy_destination" bs="$BLOCK_SIZE" \
+            count="$copy_blocks" 2>/dev/null
+    else
+        "$BUSYBOX" timeout -t "$copy_timeout_seconds" -s KILL "$BUSYBOX" dd \
+            if="$copy_source" of="$copy_destination" bs="$BLOCK_SIZE" \
+            count="$copy_blocks" 2>/dev/null
+    fi
+    copy_status=$?
+    case "$copy_status" in
+        124|137|143) return 124 ;;
+        *) return "$copy_status" ;;
+    esac
+}
+
 VERSION_PATH="${CMU_ROOT}/jci/version.ini"
 [ -r "$VERSION_PATH" ] && [ -f "$VERSION_PATH" ] || exit 66
+VERSION_GATE_COPY="$USB_ROOT/.cmu-version-gate.$$"
+
+gate_fail() {
+    gate_status=$1
+    rm -f "$VERSION_GATE_COPY" || exit 69
+    [ ! -e "$VERSION_GATE_COPY" ] || exit 69
+    exit "$gate_status"
+}
+
+bounded_copy "$VERSION_PATH" "$VERSION_GATE_COPY" "$BLOCKS_WITHOUT_SENTINEL" \
+    "$GATE_TIMEOUT_SECONDS" || gate_fail 69
 
 FIRMWARE_VERSION=
 FIRMWARE_PATCH=
@@ -54,60 +96,55 @@ while IFS= read -r version_line; do
     esac
     case "$version_line" in
         JCI_SW_VER=*)
-            [ "$SEEN_SW_VER" -eq 0 ] || exit 67
+            [ "$SEEN_SW_VER" -eq 0 ] || gate_fail 67
             SEEN_SW_VER=1
             value=${version_line#*=}
             case "$value" in
                 \"*\") value=${value#\"}; value=${value%\"} ;;
-                *) exit 67 ;;
+                *) gate_fail 67 ;;
             esac
             FIRMWARE_VERSION=$value
             ;;
         JCI_SW_VER_PATCH=*)
-            [ "$SEEN_SW_VER_PATCH" -eq 0 ] || exit 67
+            [ "$SEEN_SW_VER_PATCH" -eq 0 ] || gate_fail 67
             SEEN_SW_VER_PATCH=1
             value=${version_line#*=}
             case "$value" in
                 \"*\") value=${value#\"}; value=${value%\"} ;;
-                *) exit 67 ;;
+                *) gate_fail 67 ;;
             esac
             FIRMWARE_PATCH=$value
             ;;
         JCI_SW_FLAVOR=*)
-            [ "$SEEN_SW_FLAVOR" -eq 0 ] || exit 67
+            [ "$SEEN_SW_FLAVOR" -eq 0 ] || gate_fail 67
             SEEN_SW_FLAVOR=1
             value=${version_line#*=}
             case "$value" in
                 \"*\") value=${value#\"}; value=${value%\"} ;;
-                *) exit 67 ;;
+                *) gate_fail 67 ;;
             esac
             FIRMWARE_FLAVOR=$value
             ;;
         JCI_SW_PART_NUMBER=*)
-            [ "$SEEN_SW_PART_NUMBER" -eq 0 ] || exit 67
+            [ "$SEEN_SW_PART_NUMBER" -eq 0 ] || gate_fail 67
             SEEN_SW_PART_NUMBER=1
             value=${version_line#*=}
             case "$value" in
                 \"*\") value=${value#\"}; value=${value%\"} ;;
-                *) exit 67 ;;
+                *) gate_fail 67 ;;
             esac
             SOFTWARE_PART_NUMBER=$value
             ;;
     esac
-done <"$VERSION_PATH"
+done <"$VERSION_GATE_COPY"
 
 case "$SEEN_SW_VER:$SEEN_SW_VER_PATCH:$SEEN_SW_FLAVOR:$SEEN_SW_PART_NUMBER:$FIRMWARE_VERSION:$FIRMWARE_PATCH:$FIRMWARE_FLAVOR:$SOFTWARE_PART_NUMBER" in
     1:1:1:1:MAZ_CMU-150_70.00.100:A:NA:SWI10-24818-807R02) ;;
-    *) exit 67 ;;
+    *) gate_fail 67 ;;
 esac
 
-if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" != "1" ]; then
-    "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" true >/dev/null 2>&1 || exit 68
-    "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" dd if=/dev/null of=/dev/null \
-        bs=1 count=1 >/dev/null 2>&1 || exit 68
-    "$BUSYBOX" timeout -t 1 -s KILL "$BUSYBOX" cksum "$VERSION_PATH" \
-        >/dev/null 2>&1 || exit 68
-fi
+rm -f "$VERSION_GATE_COPY" || exit 69
+[ ! -e "$VERSION_GATE_COPY" ] || exit 69
 
 REPORT="$USB_ROOT/mazda-cmu-report"
 mkdir "$REPORT" 2>/dev/null || exit 73
@@ -118,26 +155,6 @@ printf 'mazda-cmu-report\t2\nbuild\t%s\nsource\tstatus\tbytes\tcksum\tfile\n' \
 record_status() {
     printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" \
         >>"$MANIFEST" 2>/dev/null || exit 74
-}
-
-bounded_copy() {
-    copy_source=$1
-    copy_destination=$2
-    copy_blocks=$3
-    if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
-        "$TIMEOUT_PROGRAM" "$READ_TIMEOUT_SECONDS" "$DD_PROGRAM" \
-            if="$copy_source" of="$copy_destination" bs="$BLOCK_SIZE" \
-            count="$copy_blocks" 2>/dev/null
-    else
-        "$BUSYBOX" timeout -t "$READ_TIMEOUT_SECONDS" -s KILL "$BUSYBOX" dd \
-            if="$copy_source" of="$copy_destination" bs="$BLOCK_SIZE" \
-            count="$copy_blocks" 2>/dev/null
-    fi
-    copy_status=$?
-    case "$copy_status" in
-        124|137|143) return 124 ;;
-        *) return "$copy_status" ;;
-    esac
 }
 
 bounded_checksum() {
