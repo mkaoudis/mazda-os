@@ -232,7 +232,9 @@ pub struct ReportAnalysis {
     pub firmware: String,
     pub software_part_number: String,
     pub available_usb_network_drivers: Vec<UsbNetworkDriver>,
+    pub usb_network_driver_files_status: ObservationStatus,
     pub loaded_usb_network_modules: Vec<String>,
+    pub loaded_usb_network_modules_status: ObservationStatus,
 }
 
 /// USB-network driver families relevant to a host-safe Mac transport.
@@ -241,6 +243,44 @@ pub enum UsbNetworkDriver {
     Asix,
     CdcEther,
     CdcNcm,
+}
+
+/// Manifest status retained for an observation used by the report summary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObservationStatus {
+    Ok,
+    Truncated,
+    NotFound,
+    NotRegularFile,
+    PermissionDenied,
+    DependencyFailed,
+}
+
+impl ObservationStatus {
+    /// Returns the exact status spelling used by the report manifest.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Truncated => "truncated",
+            Self::NotFound => "not_found",
+            Self::NotRegularFile => "not_regular_file",
+            Self::PermissionDenied => "permission_denied",
+            Self::DependencyFailed => "dependency_failed",
+        }
+    }
+
+    /// Whether the observation was complete enough to support a `none found` conclusion.
+    #[must_use]
+    pub const fn is_complete(self) -> bool {
+        matches!(self, Self::Ok)
+    }
+}
+
+impl fmt::Display for ObservationStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 impl ReportAnalysis {
@@ -266,6 +306,7 @@ pub enum AnalyzeError {
     UnexpectedFile(String),
     InvalidSchema,
     InvalidObservation(&'static str),
+    MalformedTextObservation(&'static str),
     ObservationFailed {
         source: &'static str,
         status: &'static str,
@@ -297,6 +338,10 @@ impl fmt::Display for AnalyzeError {
             Self::InvalidObservation(source) => {
                 write!(formatter, "manifest record for {source} is invalid")
             }
+            Self::MalformedTextObservation(source) => write!(
+                formatter,
+                "CMU observation {source} malformed: successful textual capture is not UTF-8"
+            ),
             Self::ObservationFailed { source, status } => {
                 write!(formatter, "CMU observation {source} failed with {status}")
             }
@@ -628,9 +673,15 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
             "proc/sys/kernel/osrelease",
         ));
     }
-    let module_files = observation_text_or_empty(&observations, 16);
-    validate_module_file_list(module_files, kernel_release)?;
-    let loaded_modules = observation_text_or_empty(&observations, 7);
+    let module_files_observation = observations.get(16).ok_or(AnalyzeError::InvalidSchema)?;
+    let module_files = optional_observation_text(module_files_observation)?;
+    if let Some(module_files) = module_files {
+        validate_module_file_list(module_files, kernel_release)?;
+    }
+    let loaded_modules_observation = observations.get(7).ok_or(AnalyzeError::InvalidSchema)?;
+    let loaded_modules = optional_observation_text(loaded_modules_observation)?;
+    let module_files_text = module_files.unwrap_or_default();
+    let loaded_modules_text = loaded_modules.unwrap_or_default();
 
     let mut available_usb_network_drivers = Vec::new();
     for (module, driver) in [
@@ -638,7 +689,7 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
         ("cdc_ether", UsbNetworkDriver::CdcEther),
         ("cdc_ncm", UsbNetworkDriver::CdcNcm),
     ] {
-        if module_is_available(module_files, loaded_modules, module) {
+        if module_is_available(module_files_text, loaded_modules_text, module) {
             available_usb_network_drivers.push(driver);
         }
     }
@@ -647,7 +698,9 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
         firmware,
         software_part_number: firmware_identity.software_part_number.to_owned(),
         available_usb_network_drivers,
-        loaded_usb_network_modules: parse_loaded_usb_network_modules(loaded_modules),
+        usb_network_driver_files_status: module_files_observation.status,
+        loaded_usb_network_modules: parse_loaded_usb_network_modules(loaded_modules_text),
+        loaded_usb_network_modules_status: loaded_modules_observation.status,
     })
 }
 
@@ -763,6 +816,7 @@ fn analyze_io_error(action: &'static str, path: &Path, source: io::Error) -> Ana
 #[derive(Debug)]
 struct Observation {
     spec: ObservationSpec,
+    status: ObservationStatus,
     content: Option<Vec<u8>>,
 }
 
@@ -811,6 +865,11 @@ fn validate_observation(
         }
         Ok(Observation {
             spec,
+            status: if status == "ok" {
+                ObservationStatus::Ok
+            } else {
+                ObservationStatus::Truncated
+            },
             content: Some(content),
         })
     } else if matches!(
@@ -822,6 +881,13 @@ fn validate_observation(
     {
         Ok(Observation {
             spec,
+            status: match status {
+                "not_found" => ObservationStatus::NotFound,
+                "not_regular_file" => ObservationStatus::NotRegularFile,
+                "permission_denied" => ObservationStatus::PermissionDenied,
+                "dependency_failed" => ObservationStatus::DependencyFailed,
+                _ => unreachable!("status was matched above"),
+            },
             content: None,
         })
     } else {
@@ -858,15 +924,18 @@ fn observation_text(observations: &[Observation], index: usize) -> Result<&str, 
         .as_deref()
         .ok_or(AnalyzeError::InvalidObservation(observation.spec.source))?;
     std::str::from_utf8(content)
-        .map_err(|_| AnalyzeError::InvalidObservation(observation.spec.source))
+        .map_err(|_| AnalyzeError::MalformedTextObservation(observation.spec.source))
 }
 
-fn observation_text_or_empty(observations: &[Observation], index: usize) -> &str {
-    observations
-        .get(index)
-        .and_then(|observation| observation.content.as_deref())
-        .and_then(|content| std::str::from_utf8(content).ok())
-        .unwrap_or_default()
+fn optional_observation_text(observation: &Observation) -> Result<Option<&str>, AnalyzeError> {
+    observation
+        .content
+        .as_deref()
+        .map(|content| {
+            std::str::from_utf8(content)
+                .map_err(|_| AnalyzeError::MalformedTextObservation(observation.spec.source))
+        })
+        .transpose()
 }
 
 fn read_required_report_bytes(
@@ -1725,10 +1794,75 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             [UsbNetworkDriver::Asix]
         );
         assert_eq!(
+            analysis.usb_network_driver_files_status,
+            ObservationStatus::Ok
+        );
+        assert_eq!(
+            analysis.loaded_usb_network_modules_status,
+            ObservationStatus::NotFound
+        );
+        assert_eq!(
             fs::read(root.0.join("persistent/sentinel")).expect("read sentinel"),
             b"unchanged"
         );
         usb.assert_no_firmware_gate_copy();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn analyzer_preserves_unavailable_usb_observation_statuses() {
+        let usb = TestDirectory::new("unavailable-observations-usb");
+        let root = TestDirectory::new("unavailable-observations-root");
+        prepare_payload_files(&usb.0).expect("prepare payload");
+        root.write("jci/version.ini", TARGET_VERSION_INI);
+        root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
+
+        let output = Command::new("sh")
+            .arg(usb.0.join(COLLECTOR_FILE_NAME))
+            .env("MAZDA_CMU_INSPECT_TESTING", "1")
+            .env("MAZDA_CMU_INSPECT_TEST_ROOT", &root.0)
+            .env("MAZDA_CMU_INSPECT_TEST_USB", &usb.0)
+            .output()
+            .expect("run collector");
+        assert!(output.status.success());
+
+        let analysis =
+            analyze_report(&usb.0.join("mazda-cmu-report")).expect("analyze complete report");
+        assert!(analysis.available_usb_network_drivers.is_empty());
+        assert!(analysis.loaded_usb_network_modules.is_empty());
+        assert_eq!(
+            analysis.usb_network_driver_files_status,
+            ObservationStatus::NotFound
+        );
+        assert_eq!(
+            analysis.loaded_usb_network_modules_status,
+            ObservationStatus::NotFound
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn analyzer_rejects_invalid_utf8_in_successful_text_observation() {
+        let usb = TestDirectory::new("malformed-observation-usb");
+        let root = TestDirectory::new("malformed-observation-root");
+        prepare_payload_files(&usb.0).expect("prepare payload");
+        root.write("jci/version.ini", TARGET_VERSION_INI);
+        root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
+        root.write("proc/modules", &[0xff, b'\n']);
+
+        let output = Command::new("sh")
+            .arg(usb.0.join(COLLECTOR_FILE_NAME))
+            .env("MAZDA_CMU_INSPECT_TESTING", "1")
+            .env("MAZDA_CMU_INSPECT_TEST_ROOT", &root.0)
+            .env("MAZDA_CMU_INSPECT_TEST_USB", &usb.0)
+            .output()
+            .expect("run collector");
+        assert!(output.status.success());
+
+        assert!(matches!(
+            analyze_report(&usb.0.join("mazda-cmu-report")),
+            Err(AnalyzeError::MalformedTextObservation("proc/modules"))
+        ));
     }
 
     #[test]

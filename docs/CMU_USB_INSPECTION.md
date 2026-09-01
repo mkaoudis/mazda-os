@@ -174,10 +174,13 @@ The analyzer is read-only. It rejects a missing or incorrect completion marker, 
 duplicate rows, unknown statuses, any timeout or I/O error, wrong sizes or checksums, unexpected
 files, symlinks, captures over 1 MiB, the wrong build ID, module paths from another kernel, or any
 firmware metadata other than raw version `MAZ_CMU-150_70.00.100`, patch `A`, flavor `NA`, and
-software part `SWI10-24818-807R02`.
+software part `SWI10-24818-807R02`. Successful textual evidence used for USB-network analysis must
+also be valid UTF-8; malformed captures are rejected rather than treated as empty.
 
 Allowed nonfatal capture statuses are `not_found`, `not_regular_file`, `permission_denied`, and
-`dependency_failed`. Missing evidence is never a reason to elevate privileges or broaden the
+`dependency_failed`. The analysis retains these statuses and prints `none found` only when every
+source needed for that conclusion was captured completely. Otherwise it prints `observation
+unavailable: <status>`. Missing evidence is never a reason to elevate privileges or broaden the
 payload.
 
 Report content is sensitive. Review and redact hostnames, mount paths, and network details before
