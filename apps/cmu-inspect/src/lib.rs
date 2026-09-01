@@ -131,6 +131,9 @@ pub enum PrepareError {
     DestinationNotFat32,
     DestinationNotRemovable,
     DestinationNotMbr,
+    DestinationInvalidDiskMetadata,
+    DestinationNotFirstPartition,
+    DestinationNotSinglePartition,
     DestinationNotEmpty(String),
     UnexpectedPostWriteEntry(String),
     PreparedPayloadMismatch(String),
@@ -173,6 +176,18 @@ impl fmt::Display for PrepareError {
             Self::DestinationNotMbr => {
                 write!(formatter, "destination disk does not use an MBR partition map")
             }
+            Self::DestinationInvalidDiskMetadata => write!(
+                formatter,
+                "diskutil returned incomplete or malformed volume metadata"
+            ),
+            Self::DestinationNotFirstPartition => write!(
+                formatter,
+                "destination volume must be the first partition (s1) of its parent disk"
+            ),
+            Self::DestinationNotSinglePartition => write!(
+                formatter,
+                "destination disk must contain exactly one partition, the selected FAT32 volume"
+            ),
             Self::DestinationNotEmpty(name) => write!(
                 formatter,
                 "destination contains non-macOS-metadata entry {name:?}; use a blank FAT32 drive"
@@ -897,12 +912,10 @@ fn verify_macos_volume(destination: &Path) -> Result<(), PrepareError> {
         ));
     }
 
-    let volume_plist = String::from_utf8_lossy(&output.stdout);
-    let parent_disk = plist_string_value(&volume_plist, "ParentWholeDisk")
-        .ok_or(PrepareError::DestinationNotMbr)?;
+    let volume_identity = parse_macos_volume_identity(&output.stdout)?;
 
     let disk_output = Command::new("/usr/sbin/diskutil")
-        .args(["list", "-plist", parent_disk])
+        .args(["list", "-plist", &volume_identity.parent_whole_disk])
         .output()
         .map_err(|error| io_error("inspect partition map with diskutil", destination, error))?;
     if !disk_output.status.success() {
@@ -913,42 +926,112 @@ fn verify_macos_volume(destination: &Path) -> Result<(), PrepareError> {
         ));
     }
 
-    validate_macos_volume_plists(&volume_plist, &String::from_utf8_lossy(&disk_output.stdout))
+    validate_macos_volume_plists(&output.stdout, &disk_output.stdout)
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn plist_value_starts_with(plist: &str, key: &str, expected_value: &str) -> bool {
-    let marker = format!("<key>{key}</key>");
-    plist
-        .split_once(&marker)
-        .is_some_and(|(_, remainder)| remainder.trim_start().starts_with(expected_value))
+#[derive(Debug)]
+struct MacosVolumeIdentity {
+    device_identifier: String,
+    parent_whole_disk: String,
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn plist_string_value<'a>(plist: &'a str, key: &str) -> Option<&'a str> {
-    let marker = format!("<key>{key}</key>");
-    let (_, remainder) = plist.split_once(&marker)?;
-    let remainder = remainder.trim_start().strip_prefix("<string>")?;
-    remainder.split_once("</string>").map(|(value, _)| value)
+fn parse_plist(plist_bytes: &[u8]) -> Result<plist::Value, PrepareError> {
+    plist::Value::from_reader(std::io::Cursor::new(plist_bytes))
+        .map_err(|_| PrepareError::DestinationInvalidDiskMetadata)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_volume_identity(volume_plist: &[u8]) -> Result<MacosVolumeIdentity, PrepareError> {
+    let volume = parse_plist(volume_plist)?;
+    let volume = volume
+        .as_dictionary()
+        .ok_or(PrepareError::DestinationInvalidDiskMetadata)?;
+    let device_identifier = volume
+        .get("DeviceIdentifier")
+        .and_then(plist::Value::as_string)
+        .ok_or(PrepareError::DestinationInvalidDiskMetadata)?;
+    let parent_whole_disk = volume
+        .get("ParentWholeDisk")
+        .and_then(plist::Value::as_string)
+        .ok_or(PrepareError::DestinationInvalidDiskMetadata)?;
+
+    Ok(MacosVolumeIdentity {
+        device_identifier: device_identifier.to_owned(),
+        parent_whole_disk: parent_whole_disk.to_owned(),
+    })
 }
 
 #[cfg(any(target_os = "macos", test))]
 fn validate_macos_volume_plists(
-    volume_plist: &str,
-    whole_disk_plist: &str,
+    volume_plist: &[u8],
+    whole_disk_plist: &[u8],
 ) -> Result<(), PrepareError> {
-    let filesystem_type = plist_string_value(volume_plist, "FilesystemType");
-    let filesystem_name = plist_string_value(volume_plist, "FilesystemName");
+    let volume = parse_plist(volume_plist)?;
+    let volume = volume
+        .as_dictionary()
+        .ok_or(PrepareError::DestinationInvalidDiskMetadata)?;
+    let filesystem_type = volume
+        .get("FilesystemType")
+        .and_then(plist::Value::as_string);
+    let filesystem_name = volume
+        .get("FilesystemName")
+        .and_then(plist::Value::as_string);
     if filesystem_type != Some("msdos")
         || !filesystem_name.is_some_and(|name| name.to_ascii_uppercase().contains("FAT32"))
     {
         return Err(PrepareError::DestinationNotFat32);
     }
-    if !plist_value_starts_with(volume_plist, "RemovableMedia", "<true/>") {
+    if volume
+        .get("RemovableMedia")
+        .and_then(plist::Value::as_boolean)
+        != Some(true)
+    {
         return Err(PrepareError::DestinationNotRemovable);
     }
-    if plist_string_value(whole_disk_plist, "Content") != Some("FDisk_partition_scheme") {
+
+    let identity = parse_macos_volume_identity(volume_plist)?;
+    let expected_device = format!("{}s1", identity.parent_whole_disk);
+    if identity.device_identifier != expected_device {
+        return Err(PrepareError::DestinationNotFirstPartition);
+    }
+
+    let disk = parse_plist(whole_disk_plist)?;
+    let all_disks = disk
+        .as_dictionary()
+        .and_then(|root| root.get("AllDisksAndPartitions"))
+        .and_then(plist::Value::as_array)
+        .ok_or(PrepareError::DestinationInvalidDiskMetadata)?;
+    let parent = all_disks
+        .iter()
+        .filter_map(plist::Value::as_dictionary)
+        .find(|entry| {
+            entry
+                .get("DeviceIdentifier")
+                .and_then(plist::Value::as_string)
+                == Some(identity.parent_whole_disk.as_str())
+        })
+        .ok_or(PrepareError::DestinationInvalidDiskMetadata)?;
+    if parent.get("Content").and_then(plist::Value::as_string) != Some("FDisk_partition_scheme") {
         return Err(PrepareError::DestinationNotMbr);
+    }
+    let partitions = parent
+        .get("Partitions")
+        .and_then(plist::Value::as_array)
+        .ok_or(PrepareError::DestinationInvalidDiskMetadata)?;
+    if partitions.len() != 1 {
+        return Err(PrepareError::DestinationNotSinglePartition);
+    }
+    let selected_partition = partitions[0]
+        .as_dictionary()
+        .ok_or(PrepareError::DestinationInvalidDiskMetadata)?;
+    if selected_partition
+        .get("DeviceIdentifier")
+        .and_then(plist::Value::as_string)
+        != Some(identity.device_identifier.as_str())
+    {
+        return Err(PrepareError::DestinationNotSinglePartition);
     }
 
     Ok(())
@@ -1064,35 +1147,97 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
 
     #[test]
     fn diskutil_plists_require_fat32_removable_media_and_mbr() {
-        let volume = r"
-            <plist><dict>
+        let volume = br#"
+            <plist version="1.0"><dict>
             <key>FilesystemType</key><string>msdos</string>
             <key>FilesystemName</key><string>MS-DOS FAT32</string>
+            <key>DeviceIdentifier</key><string>disk7s1</string>
             <key>ParentWholeDisk</key><string>disk7</string>
             <key>RemovableMedia</key><true/>
             </dict></plist>
-        ";
-        let mbr = r"
-            <plist><dict><key>AllDisksAndPartitions</key><array><dict>
+        "#;
+        let mbr = br#"
+            <plist version="1.0"><dict><key>AllDisksAndPartitions</key><array><dict>
+            <key>DeviceIdentifier</key><string>disk7</string>
             <key>Content</key><string>FDisk_partition_scheme</string>
+            <key>Partitions</key><array><dict>
+                <key>DeviceIdentifier</key><string>disk7s1</string>
+                <key>Content</key><string>DOS_FAT_32</string>
+            </dict></array>
             </dict></array></dict></plist>
-        ";
+        "#;
         assert!(validate_macos_volume_plists(volume, mbr).is_ok());
 
-        let fat16 = volume.replace("FAT32", "FAT16");
+        let fat16 = String::from_utf8_lossy(volume).replace("FAT32", "FAT16");
         assert!(matches!(
-            validate_macos_volume_plists(&fat16, mbr),
+            validate_macos_volume_plists(fat16.as_bytes(), mbr),
             Err(PrepareError::DestinationNotFat32)
         ));
-        let fixed = volume.replace("<true/>", "<false/>");
+        let fixed = String::from_utf8_lossy(volume).replace("<true/>", "<false/>");
         assert!(matches!(
-            validate_macos_volume_plists(&fixed, mbr),
+            validate_macos_volume_plists(fixed.as_bytes(), mbr),
             Err(PrepareError::DestinationNotRemovable)
         ));
-        let guid = mbr.replace("FDisk_partition_scheme", "GUID_partition_scheme");
+        let guid =
+            String::from_utf8_lossy(mbr).replace("FDisk_partition_scheme", "GUID_partition_scheme");
         assert!(matches!(
-            validate_macos_volume_plists(volume, &guid),
+            validate_macos_volume_plists(volume, guid.as_bytes()),
             Err(PrepareError::DestinationNotMbr)
+        ));
+    }
+
+    #[test]
+    fn diskutil_plists_reject_selected_second_partition() {
+        let volume = br#"
+            <plist version="1.0"><dict>
+            <key>FilesystemType</key><string>msdos</string>
+            <key>FilesystemName</key><string>MS-DOS FAT32</string>
+            <key>DeviceIdentifier</key><string>disk7s2</string>
+            <key>ParentWholeDisk</key><string>disk7</string>
+            <key>RemovableMedia</key><true/>
+            </dict></plist>
+        "#;
+        let mbr = br#"
+            <plist version="1.0"><dict><key>AllDisksAndPartitions</key><array><dict>
+            <key>DeviceIdentifier</key><string>disk7</string>
+            <key>Content</key><string>FDisk_partition_scheme</string>
+            <key>Partitions</key><array><dict>
+                <key>DeviceIdentifier</key><string>disk7s2</string>
+            </dict></array>
+            </dict></array></dict></plist>
+        "#;
+
+        assert!(matches!(
+            validate_macos_volume_plists(volume, mbr),
+            Err(PrepareError::DestinationNotFirstPartition)
+        ));
+    }
+
+    #[test]
+    fn diskutil_plists_reject_multiple_partitions() {
+        let volume = br#"
+            <plist version="1.0"><dict>
+            <key>FilesystemType</key><string>msdos</string>
+            <key>FilesystemName</key><string>MS-DOS FAT32</string>
+            <key>DeviceIdentifier</key><string>disk7s1</string>
+            <key>ParentWholeDisk</key><string>disk7</string>
+            <key>RemovableMedia</key><true/>
+            </dict></plist>
+        "#;
+        let mbr = br#"
+            <plist version="1.0"><dict><key>AllDisksAndPartitions</key><array><dict>
+            <key>DeviceIdentifier</key><string>disk7</string>
+            <key>Content</key><string>FDisk_partition_scheme</string>
+            <key>Partitions</key><array>
+              <dict><key>DeviceIdentifier</key><string>disk7s1</string></dict>
+              <dict><key>DeviceIdentifier</key><string>disk7s2</string></dict>
+            </array>
+            </dict></array></dict></plist>
+        "#;
+
+        assert!(matches!(
+            validate_macos_volume_plists(volume, mbr),
+            Err(PrepareError::DestinationNotSinglePartition)
         ));
     }
 
