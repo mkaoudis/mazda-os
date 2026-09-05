@@ -1,0 +1,16 @@
+[package]
+name = "mazda-cmu-inspect"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = { version = "1.10.0", default-features = false }
+
+[dev-dependencies]
+plist = { version = "1.10.0", default-features = false }

@@ -4,16 +4,29 @@
 //! shell execution, and filesystem mutation.
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SpeedKph(f32);
+pub struct SpeedKph(Option<f32>);
 
 impl SpeedKph {
+    /// Creates a speed reading, preserving invalid input as unavailable data.
+    ///
+    /// Negative and non-finite values are not valid vehicle speeds. They must not be
+    /// normalized to zero because zero is a valid reading with a different meaning.
     #[must_use]
     pub fn new(value: f32) -> Self {
-        Self(value.max(0.0))
+        if value.is_finite() && value >= 0.0 {
+            Self(Some(value))
+        } else {
+            Self::unavailable()
+        }
     }
 
     #[must_use]
-    pub fn get(self) -> f32 {
+    pub const fn unavailable() -> Self {
+        Self(None)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> Option<f32> {
         self.0
     }
 }
@@ -85,4 +98,23 @@ pub trait MazdaReadOnly {
     fn vehicle_snapshot(&self) -> VehicleSnapshot;
     fn media_state(&self) -> MediaState;
     fn next_commander_event(&mut self) -> Option<CommanderEvent>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpeedKph;
+
+    #[test]
+    fn speed_preserves_valid_zero_and_positive_values() {
+        assert_eq!(SpeedKph::new(0.0).get(), Some(0.0));
+        assert_eq!(SpeedKph::new(42.5).get(), Some(42.5));
+    }
+
+    #[test]
+    fn invalid_speed_is_explicitly_unavailable() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1] {
+            assert_eq!(SpeedKph::new(value), SpeedKph::unavailable());
+            assert_eq!(SpeedKph::new(value).get(), None);
+        }
+    }
 }
