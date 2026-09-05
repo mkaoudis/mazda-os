@@ -43,7 +43,7 @@ const STAGED_LAUNCHER_FILE_NAME: &str = ".cmu-launcher-stage";
 const COLLECTOR: &[u8] = include_bytes!("../assets/cmu-inspect.sh");
 const MAX_REPORT_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_CAPTURE_BYTES: u64 = 256 * 1024;
-const REPORT_BUILD_ID: &str = "mazda-cmu-inspect-70.00.100-na-report-v2";
+const REPORT_BUILD_ID: &str = "mazda-cmu-inspect-70.00.100-na-report-v3";
 
 #[derive(Debug, Clone, Copy)]
 struct ObservationSpec {
@@ -711,7 +711,42 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
 fn create_new_file(path: &Path, content: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(content)?;
-    file.sync_all()
+    file.sync_all()?;
+
+    // Recent macOS releases can propagate `com.apple.provenance` to files created on FAT media.
+    // FAT stores that attribute in an AppleDouble `._*` sidecar, which the CMU must never see as
+    // another update file. Clear attributes and remove only the corresponding newly generated
+    // sidecar from each inert/fixed payload before its exact-byte and directory-entry verification;
+    // any failure still enters the verified-cleanup path.
+    #[cfg(target_os = "macos")]
+    clear_macos_extended_attributes(path)?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn clear_macos_extended_attributes(path: &Path) -> io::Result<()> {
+    let status = Command::new("/usr/bin/xattr")
+        .arg("-c")
+        .arg(path)
+        .status()?;
+    if !status.success() {
+        return Err(io::Error::other(
+            "xattr returned a failure status while clearing payload metadata",
+        ));
+    }
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("payload path has no file name"))?;
+    let mut sidecar_name = std::ffi::OsString::from("._");
+    sidecar_name.push(file_name);
+    let sidecar_path = path.with_file_name(sidecar_name);
+    match fs::remove_file(sidecar_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1312,6 +1347,15 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
                     .starts_with(".cmu-version-gate.")
             }));
         }
+
+        #[cfg(target_os = "linux")]
+        fn assert_launch_receipt(&self) {
+            assert_eq!(
+                fs::read_to_string(self.0.join("cmu-inspect-launch-seen"))
+                    .expect("read launch receipt"),
+                format!("launch\tseen\nbuild\t{REPORT_BUILD_ID}\n")
+            );
+        }
     }
 
     impl Drop for TestDirectory {
@@ -1617,6 +1661,12 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
     #[test]
     fn collector_bounds_firmware_gate_before_parsing() {
         let collector = std::str::from_utf8(COLLECTOR).expect("collector is UTF-8");
+        let launch_receipt = collector
+            .find("LAUNCH_RECEIPT=\"$USB_ROOT/cmu-inspect-launch-seen\"")
+            .expect("collector names its fixed launch receipt");
+        let launch_flush = collector
+            .find("flush_filesystems || exit 75")
+            .expect("collector flushes its launch receipt");
         let applet_validation = collector
             .find("cksum /dev/null")
             .expect("collector validates cksum");
@@ -1627,6 +1677,8 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             .find("done <\"$VERSION_GATE_COPY\"")
             .expect("collector parses bounded firmware copy");
 
+        assert!(launch_receipt < launch_flush);
+        assert!(launch_flush < applet_validation);
         assert!(applet_validation < bounded_gate);
         assert!(bounded_gate < parse_gate);
         assert!(!collector.contains("done <\"$VERSION_PATH\""));
@@ -1688,6 +1740,14 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
                 "/tmp/mnt/sda1/mazda-cmu-report/flush-complete",
             ],
         );
+        let launch_receipt_output = run_in_fixture_chroot(
+            &fixture.0,
+            &[
+                "/bin/busybox",
+                "cat",
+                "/tmp/mnt/sda1/cmu-inspect-launch-seen",
+            ],
+        );
 
         let timeout_started = std::time::Instant::now();
         let timeout_output = run_in_fixture_chroot(
@@ -1724,6 +1784,11 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             flush_marker_output.stdout,
             format!("flush\tcomplete\nbuild\t{REPORT_BUILD_ID}\n").as_bytes()
         );
+        assert!(launch_receipt_output.status.success());
+        assert_eq!(
+            launch_receipt_output.stdout,
+            format!("launch\tseen\nbuild\t{REPORT_BUILD_ID}\n").as_bytes()
+        );
         assert!(timeout_output.status.success());
         assert_eq!(timeout_output.stdout, b"137\n");
         assert!(timeout_elapsed < Duration::from_secs(4));
@@ -1749,6 +1814,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
 
         assert!(!output.status.success());
         assert!(!usb.0.join("mazda-cmu-report").exists());
+        usb.assert_launch_receipt();
         usb.assert_no_firmware_gate_copy();
     }
 
@@ -1787,6 +1853,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         assert!(output.status.success());
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
+        usb.assert_launch_receipt();
         let report = usb.0.join("mazda-cmu-report");
         assert_eq!(
             fs::read(report.join("kernel-version.txt")).expect("read captured kernel"),
@@ -1853,7 +1920,7 @@ count=0\n\
 if [ -r \"$state\" ]; then IFS= read -r count <\"$state\"; fi\n\
 count=$((count + 1))\n\
 printf '%s\\n' \"$count\" >\"$state\" || exit 90\n\
-[ \"$count\" -ne 2 ]\n",
+[ \"$count\" -ne 3 ]\n",
         )
         .expect("write mock sync program");
         fs::set_permissions(&sync_program, fs::Permissions::from_mode(0o755))
@@ -1872,7 +1939,7 @@ printf '%s\\n' \"$count\" >\"$state\" || exit 90\n\
         assert_eq!(output.status.code(), Some(75));
         assert_eq!(
             fs::read_to_string(&sync_state).expect("read mock sync state"),
-            "2\n"
+            "3\n"
         );
         let report = usb.0.join("mazda-cmu-report");
         let manifest = fs::read_to_string(report.join("manifest.tsv")).expect("read manifest");
@@ -1966,6 +2033,7 @@ JCI_SW_PART_NUMBER=\"SWI10-26479-118R02\"\n",
 
         assert!(!output.status.success());
         assert!(!usb.0.join("mazda-cmu-report").exists());
+        usb.assert_launch_receipt();
         usb.assert_no_firmware_gate_copy();
     }
 
@@ -1993,6 +2061,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
 
         assert!(!output.status.success());
         assert!(!usb.0.join("mazda-cmu-report").exists());
+        usb.assert_launch_receipt();
         usb.assert_no_firmware_gate_copy();
     }
 
@@ -2041,6 +2110,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
 
             assert!(!output.status.success());
             assert!(!usb.0.join("mazda-cmu-report").exists());
+            usb.assert_launch_receipt();
             usb.assert_no_firmware_gate_copy();
         }
     }

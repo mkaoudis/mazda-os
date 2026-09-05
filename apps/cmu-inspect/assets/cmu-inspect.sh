@@ -1,16 +1,17 @@
 #!/bin/sh
 # Bench-only, report-only collector for one 2019.5 Mazda CX-5 GT identity on 70.00.100 NA N.
 #
-# This script writes only a new report directory on the removable USB filesystem. It does not
-# remount, reboot, persist, configure networking, change services, load modules, or access VIP,
-# CAN, or LIN interfaces. The update scanner launches it as root before its firmware gate can run
-# and is outside this script's control; never use the payload on a CMU connected to a vehicle.
+# This script writes only a fixed launch receipt, a bounded firmware-gate copy, and a new report
+# directory on the removable USB filesystem. It does not remount, reboot, persist, configure
+# networking, change services, load modules, or access VIP, CAN, or LIN interfaces. The update
+# scanner launches it as root before its firmware gate can run and is outside this script's
+# control; never use the payload on a CMU connected to a vehicle.
 
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export PATH
 umask 077
 
-REPORT_BUILD_ID=mazda-cmu-inspect-70.00.100-na-report-v2
+REPORT_BUILD_ID=mazda-cmu-inspect-70.00.100-na-report-v3
 MAX_BYTES=262144
 BLOCK_SIZE=4096
 BLOCKS_WITH_SENTINEL=65
@@ -24,16 +25,39 @@ if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
     READ_TIMEOUT_SECONDS=${MAZDA_CMU_INSPECT_TEST_TIMEOUT_SECONDS:-5}
     GATE_TIMEOUT_SECONDS=${MAZDA_CMU_INSPECT_TEST_GATE_TIMEOUT_SECONDS:-5}
     [ -n "$CMU_ROOT" ] && [ -n "$USB_ROOT" ] || exit 64
-    TIMEOUT_PROGRAM=$(command -v timeout 2>/dev/null)
-    DD_PROGRAM=$(command -v dd 2>/dev/null)
-    CKSUM_PROGRAM=$(command -v cksum 2>/dev/null)
-    [ -x "$TIMEOUT_PROGRAM" ] && [ -x "$DD_PROGRAM" ] && [ -x "$CKSUM_PROGRAM" ] || exit 68
 else
     CMU_ROOT=
     case "$0" in
         /tmp/mnt/sda1/cmu-inspect.sh) USB_ROOT=${0%/*} ;;
         *) exit 64 ;;
     esac
+fi
+
+flush_filesystems() {
+    if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
+        [ -n "${MAZDA_CMU_INSPECT_TEST_SYNC_PROGRAM:-}" ] || return 0
+        "$MAZDA_CMU_INSPECT_TEST_SYNC_PROGRAM" >/dev/null 2>&1
+    else
+        [ -x /bin/sync ] || return 1
+        /bin/sync >/dev/null 2>&1
+    fi
+}
+
+# This is the first intentional write. Noclobber makes the receipt specific to one prepared-drive
+# attempt: an earlier receipt cannot be silently refreshed and mistaken for a new launch.
+LAUNCH_RECEIPT="$USB_ROOT/cmu-inspect-launch-seen"
+(
+    set -C
+    printf 'launch\tseen\nbuild\t%s\n' "$REPORT_BUILD_ID" >"$LAUNCH_RECEIPT"
+) 2>/dev/null || exit 76
+flush_filesystems || exit 75
+
+if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
+    TIMEOUT_PROGRAM=$(command -v timeout 2>/dev/null)
+    DD_PROGRAM=$(command -v dd 2>/dev/null)
+    CKSUM_PROGRAM=$(command -v cksum 2>/dev/null)
+    [ -x "$TIMEOUT_PROGRAM" ] && [ -x "$DD_PROGRAM" ] && [ -x "$CKSUM_PROGRAM" ] || exit 68
+else
     [ -d /jci ] || exit 65
     BUSYBOX=/bin/busybox
     [ -x "$BUSYBOX" ] || exit 68
@@ -66,16 +90,6 @@ bounded_copy() {
         124|137|143) return 124 ;;
         *) return "$copy_status" ;;
     esac
-}
-
-flush_filesystems() {
-    if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
-        [ -n "${MAZDA_CMU_INSPECT_TEST_SYNC_PROGRAM:-}" ] || return 0
-        "$MAZDA_CMU_INSPECT_TEST_SYNC_PROGRAM" >/dev/null 2>&1
-    else
-        [ -x /bin/sync ] || return 1
-        /bin/sync >/dev/null 2>&1
-    fi
 }
 
 VERSION_PATH="${CMU_ROOT}/jci/version.ini"

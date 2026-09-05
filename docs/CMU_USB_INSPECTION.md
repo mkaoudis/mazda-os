@@ -30,9 +30,10 @@ The collector is restricted to the Linux application processor. It does not invo
 open CAN or LIN devices, call vehicle-data APIs, flash firmware, remount filesystems, install
 persistence, configure networking, load modules, change services, or reboot. It reads a fixed list
 of files under `/jci`, `/proc`, `/sys`, and the running kernel's USB-network module directory. Its
-only intentional writes are a bounded temporary firmware-gate copy and a new bounded report
-directory, both on the removable USB drive. The gate copy is verified absent before report
-creation or an unsupported-identity exit.
+only intentional writes are a fixed launch receipt, a bounded temporary firmware-gate copy, and a
+new bounded report directory, all on the removable USB drive. The `cmu-inspect-launch-seen` receipt
+is flushed before CMU prerequisites or firmware are inspected. The gate copy is verified absent
+before report creation or an unsupported-identity exit.
 
 This boundary is structural: the Mac utility exposes no arbitrary command, collector path, mount,
 or shell option. Future VIP, CAN, and LIN functionality is out of scope.
@@ -52,17 +53,33 @@ bounded compatibility test, and it belongs only on a spare CMU with vehicle buse
 disconnected on the bench. Do not describe the v70 entry path as confirmed until an exact-build
 bench CMU returns a valid report.
 
-The USB root contains exactly:
+The prepared USB root initially contains exactly:
 
 - `jci-autoupdate`, which asks the stock scanner to inspect update files;
 - one otherwise empty `.up` file whose filename invokes only `cmu-inspect.sh` from the fixed
   first-drive mount `/tmp/mnt/sda1`;
 - `cmu-inspect.sh`, the fixed report collector.
 
+If the collector starts from the fixed path, it creates `cmu-inspect-launch-seen` beside those three
+files using shell built-ins and flushes it before checking `/jci`, BusyBox applets, or firmware. The
+exact receipt is:
+
+```text
+launch	seen
+build	mazda-cmu-inspect-70.00.100-na-report-v3
+```
+
+The receipt path is absolute: the launcher runs `/tmp/mnt/sda1/cmu-inspect.sh`, the collector
+accepts only that exact `$0`, and it derives `/tmp/mnt/sda1` by removing the final path component.
+It does not depend on the scanner's working directory. A valid receipt proves both that the shell
+script started and that the fixed `sda1` mount was writable. If the receipt is absent, the launcher
+did not reach the script or the drive could not accept/flush the write; those cases cannot be
+distinguished from USB evidence alone.
+
 This is root command execution in the CMU's application processor. The payload is report-only, but
 the overall mechanism is not passive or literally zero-write: the stock scanner may log activity,
-reads may update access times, and final `sync` calls may flush unrelated stock writes already
-pending. No Mazda firmware image is included, parsed, modified, or installed.
+reads may update access times, and the collector's `sync` calls may flush unrelated stock writes
+already pending. No Mazda firmware image is included, parsed, modified, or installed.
 
 References:
 
@@ -101,6 +118,12 @@ volume. The ordinary preparation error is returned only if that cleanup is verif
 tool emits: **“Media may contain an active launcher; do not insert it into the vehicle. Reformat the
 entire device.”** Treat that warning literally; do not insert the suspect drive into any CMU.
 
+Recent macOS releases may attach `com.apple.provenance` to newly created files and represent it on
+FAT media as `._*` AppleDouble sidecars. The preparer clears extended attributes from each fixed
+payload immediately after creation and removes only its corresponding generated sidecar, then
+retains its exact-byte and unexpected-entry checks. Pre-existing sidecars are rejected before any
+write, and any sidecar or other unexpected entry that remains is still rejected afterward.
+
 Run:
 
 ```bash
@@ -137,9 +160,11 @@ The narrower software guarantee remains that neither the launcher nor collector 
 queries, or writes VIP, CAN, or LIN interfaces. Physical bench isolation supplies the containment
 that the post-entry firmware gate cannot.
 
-If no `mazda-cmu-report` directory appears, the v70 trigger may not work or the fixed mount may not
-match. Stop. Do not add a second launcher, cycle through mounts, open the diagnostic update menu, or
-substitute a tweak/autorun package.
+If no `mazda-cmu-report` directory appears, inspect `cmu-inspect-launch-seen`. A valid receipt means
+the trigger and fixed mount worked but the collector stopped on a prerequisite, firmware gate, or
+early report-creation failure. No receipt means the v70 trigger may not work, the fixed mount may
+not match, or the USB was not writable. Stop. Do not add a second launcher, cycle through mounts,
+open the diagnostic update menu, or substitute a tweak/autorun package.
 
 ## Report contents and validation
 
@@ -156,19 +181,20 @@ unsupported-identity exit or report creation.
 A completed report has:
 
 - `manifest.tsv` using schema 3 and build ID
-  `mazda-cmu-inspect-70.00.100-na-report-v2`;
+  `mazda-cmu-inspect-70.00.100-na-report-v3`;
 - exactly one row for every expected source, in fixed order;
 - the byte length, POSIX `cksum`, and exact output filename for each successful capture;
 - a final `integrity<TAB>complete` record, which closes the manifest but does not claim successful
   flushing or process completion;
 - `flush-complete`, containing an explicit flush receipt and matching build ID.
 
-The collector writes the manifest integrity record and a hidden candidate receipt, then performs
-both stock `/bin/sync` calls while that receipt is still non-acceptable. Only after both calls return
-success does it atomically rename the candidate to `flush-complete`; that rename is the last report
-mutation. If either flush fails or execution stops before the rename, no acceptable marker exists
-and the hidden candidate may remain. The analyzer requires both the integrity record and the flush
-receipt, so it rejects that state without relying on cleanup.
+The launch receipt has its own early `/bin/sync`. Later, the collector writes the manifest integrity
+record and a hidden candidate report receipt, then performs two more stock `/bin/sync` calls while
+that report receipt is still non-acceptable. Only after both report flushes return success does it
+atomically rename the candidate to `flush-complete`; that rename is the last report mutation. If
+either report flush fails or execution stops before the rename, no acceptable marker exists and the
+hidden candidate may remain. The analyzer requires both the integrity record and the flush receipt,
+so it rejects that state without relying on cleanup.
 
 `flush-complete` certifies that both pre-publication flush calls returned success; it does not and
 cannot prove the collector process subsequently returned status 0. Because the receipt is published
@@ -210,9 +236,9 @@ publishing it.
 
 Linux CI downloads the official static BusyBox 1.19.0 x86-64 binary by a pinned URL and SHA-256,
 then runs the collector in a minimal chroot at its production path. That fixture exercises the
-production `/bin/busybox` applet calls, both `/bin/sync` calls, the exact launcher expansion under
-BusyBox `ash`, and a command that is genuinely killed by `timeout -t 1 -s KILL`. Host-shell tests
-remain separate.
+production `/bin/busybox` applet calls, the early launch-receipt sync and both report `/bin/sync`
+calls, the exact launcher expansion under BusyBox `ash`, and a command that is genuinely killed by
+`timeout -t 1 -s KILL`. Host-shell tests remain separate.
 
 Host-shell CI also injects a failure on the second flush and verifies that the collector returns 75,
 never publishes `flush-complete`, and leaves a report the analyzer rejects even though the hidden
