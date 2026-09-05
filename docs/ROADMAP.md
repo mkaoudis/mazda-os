@@ -5,12 +5,14 @@
 - Read-only platform capability boundary and deterministic mock backend.
 - 800×480 desktop simulator with Commander input.
 - Platform-neutral UI and renderer abstraction.
-- Firmware-gated, report-only CMU USB payload preparer with off-target tests.
+- Bench-only, firmware-gated, report-only CMU USB payload preparer with off-target tests.
 - CI: formatting, strict Clippy, and workspace tests.
 
 ## Next — bench CMU characterization
 
 - Boot a spare CMU with vehicle buses physically disconnected.
+- Validate the privileged USB entry mechanism only on that isolated spare unit; the internal
+  firmware gate runs after entry and is not a containment boundary.
 - Confirm SoC/core topology, memory, storage, firmware, and kernel configuration.
 - Inventory Wayland/EGL/GLES, Vivante libraries, input devices, and stock HMI IPC boundaries.
 - Produce a reproducible read-only hardware/software report.

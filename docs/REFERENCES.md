@@ -45,7 +45,8 @@ Primary sources and useful community work for Mazda Connect Gen 6 / 6.5 research
 ## Working assumptions for mazda-os
 
 - Treat the owner's **2019.5 CX-5 GT on `70.00.100 NA N`** as the only production target. The internal gate requires the complete raw version `MAZ_CMU-150_70.00.100`, patch `A`, flavor `NA`, and software part `SWI10-24818-807R02`.
-- Treat ZDI's update-filename injection on this exact v70 build as unconfirmed until the target car returns a valid report; ZDI's published exact test target was `74.00.324A`.
+- Treat ZDI's update-filename injection on this exact v70 build as unconfirmed until an exact-build, physically isolated bench CMU returns a valid report; ZDI's published exact test target was `74.00.324A`.
+- Run the first USB entry test only on a spare, physically isolated bench CMU. The internal firmware gate executes after the update scanner has already granted root execution and cannot validate or contain the entry mechanism.
 - Firmware lock-down primarily changes how privileged execution is obtained; once access is available, the CMU remains a conventional embedded Linux application platform.
 - Keep all project code on the application-processor side. Do not depend on VIP flashing, raw vehicle-bus access, or vehicle-control capabilities.
-- Validate important community claims against a report from the exact target CMU before making them architectural dependencies.
+- Validate important community claims against a report from an exact-build bench CMU before making them architectural dependencies.

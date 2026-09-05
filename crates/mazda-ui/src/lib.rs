@@ -3,7 +3,9 @@
 use std::borrow::Cow;
 
 use font8x8::{UnicodeFonts, BASIC_FONTS, GREEK_FONTS, HIRAGANA_FONTS, LATIN_FONTS};
-use mazda_core::{CommanderEvent, Gear, MazdaReadOnly, MediaState, PlaybackState, VehicleSnapshot};
+use mazda_core::{
+    CommanderEvent, Gear, MazdaReadOnly, MediaState, PlaybackState, SpeedKph, VehicleSnapshot,
+};
 
 pub const DISPLAY_WIDTH: usize = 800;
 pub const DISPLAY_HEIGHT: usize = 480;
@@ -357,11 +359,7 @@ impl UiModel {
     fn render_vehicle_card(&self, renderer: &mut impl Renderer, x: usize, y: usize) {
         renderer.fill_rect(Rect::new(x, y, 528, 78), Color::PANEL);
 
-        let speed = measurement_label(
-            self.vehicle.speed.get(),
-            "KM/H",
-            SPEED_COLUMN_WIDTH / (GLYPH_SIZE * 2),
-        );
+        let speed = speed_label(self.vehicle.speed);
         let temperature = measurement_label(
             self.vehicle.outside_temperature.get(),
             "C",
@@ -429,6 +427,13 @@ fn truncate_metadata(value: &mut Option<String>) {
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.is_empty())
+}
+
+fn speed_label(speed: SpeedKph) -> String {
+    let Some(value) = speed.get() else {
+        return "-- KM/H".to_owned();
+    };
+    measurement_label(value, "KM/H", SPEED_COLUMN_WIDTH / (GLYPH_SIZE * 2))
 }
 
 fn measurement_label(value: f32, unit: &str, max_characters: usize) -> String {
@@ -501,8 +506,8 @@ const fn gear_label(gear: Gear) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        bounded_media_state, fit_text, measurement_label, Color, Framebuffer, Rect, Renderer,
-        Screen, UiModel, DISPLAY_HEIGHT, DISPLAY_WIDTH, MAX_METADATA_CHARACTERS,
+        bounded_media_state, fit_text, measurement_label, speed_label, Color, Framebuffer, Rect,
+        Renderer, Screen, UiModel, DISPLAY_HEIGHT, DISPLAY_WIDTH, MAX_METADATA_CHARACTERS,
     };
     use mazda_core::{
         CommanderEvent, Gear, MediaState, PlaybackState, SpeedKph, TemperatureC, VehicleSnapshot,
@@ -612,6 +617,18 @@ mod tests {
         assert_eq!(measurement_label(f32::INFINITY, "KM/H", 10), "-- KM/H");
         assert_eq!(measurement_label(f32::NAN, "C", 19), "-- C");
         assert_eq!(measurement_label(22.4, "C", 19), "22 C");
+    }
+
+    #[test]
+    fn invalid_speed_from_constructor_renders_as_unavailable() {
+        for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -1.0] {
+            let speed = SpeedKph::new(value);
+
+            assert_eq!(speed.get(), None);
+            assert_eq!(speed_label(speed), "-- KM/H");
+        }
+
+        assert_eq!(speed_label(SpeedKph::new(0.0)), "0 KM/H");
     }
 
     #[test]

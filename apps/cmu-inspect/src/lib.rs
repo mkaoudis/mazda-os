@@ -1,8 +1,10 @@
-//! Prepare a firmware-gated, report-only USB payload for a Mazda Connect CMU.
+//! Prepare a firmware-gated, report-only USB payload for a Mazda Connect CMU on an isolated bench.
 //!
 //! The Mac-side preparer writes only to an existing, otherwise empty destination directory. The
 //! CMU-side payload is a fixed POSIX shell script embedded in this crate; it has no arbitrary path,
-//! command, persistence, remount, reboot, VIP, CAN, or LIN options.
+//! command, persistence, remount, reboot, VIP, CAN, or LIN options. The firmware gate runs inside
+//! that payload, after the stock update scanner has already invoked it as root, so it cannot
+//! validate or contain the entry mechanism itself.
 
 use std::ffi::OsStr;
 use std::fmt;
@@ -41,7 +43,7 @@ const STAGED_LAUNCHER_FILE_NAME: &str = ".cmu-launcher-stage";
 const COLLECTOR: &[u8] = include_bytes!("../assets/cmu-inspect.sh");
 const MAX_REPORT_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_CAPTURE_BYTES: u64 = 256 * 1024;
-const REPORT_BUILD_ID: &str = "mazda-cmu-inspect-70.00.100-na-report-v1";
+const REPORT_BUILD_ID: &str = "mazda-cmu-inspect-70.00.100-na-report-v2";
 
 #[derive(Debug, Clone, Copy)]
 struct ObservationSpec {
@@ -352,7 +354,7 @@ impl fmt::Display for AnalyzeError {
                 )
             }
             Self::IncompleteReport => {
-                write!(formatter, "report is missing its flushed completion marker")
+                write!(formatter, "report is missing its successful-flush marker")
             }
             Self::UnsupportedFirmware(firmware) => write!(
                 formatter,
@@ -592,7 +594,8 @@ fn verify_payload_file(
 /// This implementation is independently derived from ZDI's published filename-injection
 /// primitive. FAT disallows a literal `/`, so standard shell built-ins derive `/` by moving from
 /// `HOME` to its parent. This target-specific launcher names only the documented first-drive mount
-/// and contains no mount selection, mount-search loop, or arbitrary command input.
+/// and contains no mount selection, mount-search loop, or arbitrary command input. The launcher is
+/// necessarily evaluated before the collector can check firmware and is therefore bench-only.
 #[must_use]
 pub fn launcher_file_name() -> String {
     "$(R=$(cd ${HOME};cd ..;pwd);sh ${R}tmp${R}mnt${R}sda1${R}cmu-inspect.sh).up".to_owned()
@@ -624,7 +627,7 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
     let manifest = std::str::from_utf8(&manifest_bytes).map_err(|_| AnalyzeError::InvalidSchema)?;
     let mut manifest_lines = manifest.lines();
     let expected_build_line = format!("build\t{REPORT_BUILD_ID}");
-    if manifest_lines.next() != Some("mazda-cmu-report\t2")
+    if manifest_lines.next() != Some("mazda-cmu-report\t3")
         || manifest_lines.next() != Some(expected_build_line.as_str())
         || manifest_lines.next() != Some("source\tstatus\tbytes\tcksum\tfile")
     {
@@ -638,16 +641,16 @@ pub fn analyze_report(report_directory: &Path) -> Result<ReportAnalysis, Analyze
             .ok_or(AnalyzeError::InvalidObservation(spec.source))?;
         observations.push(validate_observation(report_directory, spec, line)?);
     }
-    if manifest_lines.next() != Some("result\tcomplete") || manifest_lines.next().is_some() {
+    if manifest_lines.next() != Some("integrity\tcomplete") || manifest_lines.next().is_some() {
         return Err(AnalyzeError::InvalidSchema);
     }
 
-    let sync_marker_path = report_directory.join("sync-complete");
-    if !sync_marker_path.exists() {
+    let flush_marker_path = report_directory.join("flush-complete");
+    if !flush_marker_path.exists() {
         return Err(AnalyzeError::IncompleteReport);
     }
-    let sync_marker = read_report_file(&sync_marker_path, "sync-complete")?;
-    if sync_marker != format!("{REPORT_BUILD_ID}\n").as_bytes() {
+    let flush_marker = read_report_file(&flush_marker_path, "flush-complete")?;
+    if flush_marker != format!("flush\tcomplete\nbuild\t{REPORT_BUILD_ID}\n").as_bytes() {
         return Err(AnalyzeError::IncompleteReport);
     }
 
@@ -904,7 +907,7 @@ fn validate_report_entries(
     for entry in entries {
         let entry = entry.map_err(|error| analyze_io_error("list", report_directory, error))?;
         let name = entry.file_name();
-        let allowed = matches!(name.to_str(), Some("manifest.tsv" | "sync-complete"))
+        let allowed = matches!(name.to_str(), Some("manifest.tsv" | "flush-complete"))
             || observations.iter().any(|observation| {
                 observation.content.is_some() && name == OsStr::new(observation.spec.file)
             });
@@ -1677,12 +1680,12 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
                 "/tmp/mnt/sda1/mazda-cmu-report/manifest.tsv",
             ],
         );
-        let sync_marker_output = run_in_fixture_chroot(
+        let flush_marker_output = run_in_fixture_chroot(
             &fixture.0,
             &[
                 "/bin/busybox",
                 "cat",
-                "/tmp/mnt/sda1/mazda-cmu-report/sync-complete",
+                "/tmp/mnt/sda1/mazda-cmu-report/flush-complete",
             ],
         );
 
@@ -1711,15 +1714,15 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             String::from_utf8_lossy(&manifest_output.stderr)
         );
         let manifest = String::from_utf8(manifest_output.stdout).expect("manifest is UTF-8");
-        assert!(manifest.ends_with("result\tcomplete\n"));
+        assert!(manifest.ends_with("integrity\tcomplete\n"));
         assert!(
-            sync_marker_output.status.success(),
-            "could not read production sync marker: {}",
-            String::from_utf8_lossy(&sync_marker_output.stderr)
+            flush_marker_output.status.success(),
+            "could not read production flush marker: {}",
+            String::from_utf8_lossy(&flush_marker_output.stderr)
         );
         assert_eq!(
-            sync_marker_output.stdout,
-            format!("{REPORT_BUILD_ID}\n").as_bytes()
+            flush_marker_output.stdout,
+            format!("flush\tcomplete\nbuild\t{REPORT_BUILD_ID}\n").as_bytes()
         );
         assert!(timeout_output.status.success());
         assert_eq!(timeout_output.stdout, b"137\n");
@@ -1798,8 +1801,8 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
         let manifest = fs::read_to_string(report.join("manifest.tsv")).expect("read manifest");
         assert!(manifest.contains("proc/cpuinfo\ttruncated\t262144\t"));
         assert_eq!(
-            fs::read_to_string(report.join("sync-complete")).expect("read sync marker"),
-            format!("{REPORT_BUILD_ID}\n")
+            fs::read_to_string(report.join("flush-complete")).expect("read flush marker"),
+            format!("flush\tcomplete\nbuild\t{REPORT_BUILD_ID}\n")
         );
         assert_eq!(
             fs::read_to_string(report.join("usb-network-modules.txt"))
@@ -1829,6 +1832,57 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\r\n";
             b"unchanged"
         );
         usb.assert_no_firmware_gate_copy();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn failed_final_flush_cannot_leave_an_accepted_report() {
+        let usb = TestDirectory::new("failed-final-flush-usb");
+        let root = TestDirectory::new("failed-final-flush-root");
+        prepare_payload_files(&usb.0).expect("prepare payload");
+        root.write("jci/version.ini", TARGET_VERSION_INI);
+        root.write("proc/sys/kernel/osrelease", b"3.0.35\n");
+
+        let sync_program = usb.0.join("mock-sync.sh");
+        let sync_state = usb.0.join("mock-sync-state");
+        fs::write(
+            &sync_program,
+            b"#!/bin/sh\n\
+state=${MAZDA_CMU_INSPECT_TEST_SYNC_STATE:?}\n\
+count=0\n\
+if [ -r \"$state\" ]; then IFS= read -r count <\"$state\"; fi\n\
+count=$((count + 1))\n\
+printf '%s\\n' \"$count\" >\"$state\" || exit 90\n\
+[ \"$count\" -ne 2 ]\n",
+        )
+        .expect("write mock sync program");
+        fs::set_permissions(&sync_program, fs::Permissions::from_mode(0o755))
+            .expect("make mock sync executable");
+
+        let output = Command::new("sh")
+            .arg(usb.0.join(COLLECTOR_FILE_NAME))
+            .env("MAZDA_CMU_INSPECT_TESTING", "1")
+            .env("MAZDA_CMU_INSPECT_TEST_ROOT", &root.0)
+            .env("MAZDA_CMU_INSPECT_TEST_USB", &usb.0)
+            .env("MAZDA_CMU_INSPECT_TEST_SYNC_PROGRAM", &sync_program)
+            .env("MAZDA_CMU_INSPECT_TEST_SYNC_STATE", &sync_state)
+            .output()
+            .expect("run collector with failed final flush");
+
+        assert_eq!(output.status.code(), Some(75));
+        assert_eq!(
+            fs::read_to_string(&sync_state).expect("read mock sync state"),
+            "2\n"
+        );
+        let report = usb.0.join("mazda-cmu-report");
+        let manifest = fs::read_to_string(report.join("manifest.tsv")).expect("read manifest");
+        assert!(manifest.ends_with("integrity\tcomplete\n"));
+        assert!(!report.join("flush-complete").exists());
+        assert!(report.join(".flush-complete.part").exists());
+        assert!(matches!(
+            analyze_report(&report),
+            Err(AnalyzeError::IncompleteReport)
+        ));
     }
 
     #[test]
@@ -2046,7 +2100,7 @@ JCI_SW_PART_NUMBER=\"SWI10-24818-807R02\"\n",
             .expect("run collector");
         assert!(output.status.success());
         let report = usb.0.join("mazda-cmu-report");
-        fs::remove_file(report.join("sync-complete")).expect("remove completion marker");
+        fs::remove_file(report.join("flush-complete")).expect("remove flush marker");
 
         assert!(matches!(
             analyze_report(&report),

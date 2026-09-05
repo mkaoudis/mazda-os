@@ -1,15 +1,16 @@
 #!/bin/sh
-# Report-only collector for one 2019.5 Mazda CX-5 GT on 70.00.100 NA N.
+# Bench-only, report-only collector for one 2019.5 Mazda CX-5 GT identity on 70.00.100 NA N.
 #
 # This script writes only a new report directory on the removable USB filesystem. It does not
 # remount, reboot, persist, configure networking, change services, load modules, or access VIP,
-# CAN, or LIN interfaces. The update scanner that launches it is outside this script's control.
+# CAN, or LIN interfaces. The update scanner launches it as root before its firmware gate can run
+# and is outside this script's control; never use the payload on a CMU connected to a vehicle.
 
 PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export PATH
 umask 077
 
-REPORT_BUILD_ID=mazda-cmu-inspect-70.00.100-na-report-v1
+REPORT_BUILD_ID=mazda-cmu-inspect-70.00.100-na-report-v2
 MAX_BYTES=262144
 BLOCK_SIZE=4096
 BLOCKS_WITH_SENTINEL=65
@@ -65,6 +66,16 @@ bounded_copy() {
         124|137|143) return 124 ;;
         *) return "$copy_status" ;;
     esac
+}
+
+flush_filesystems() {
+    if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" = "1" ]; then
+        [ -n "${MAZDA_CMU_INSPECT_TEST_SYNC_PROGRAM:-}" ] || return 0
+        "$MAZDA_CMU_INSPECT_TEST_SYNC_PROGRAM" >/dev/null 2>&1
+    else
+        [ -x /bin/sync ] || return 1
+        /bin/sync >/dev/null 2>&1
+    fi
 }
 
 VERSION_PATH="${CMU_ROOT}/jci/version.ini"
@@ -149,7 +160,7 @@ rm -f "$VERSION_GATE_COPY" || exit 69
 REPORT="$USB_ROOT/mazda-cmu-report"
 mkdir "$REPORT" 2>/dev/null || exit 73
 MANIFEST="$REPORT/manifest.tsv"
-printf 'mazda-cmu-report\t2\nbuild\t%s\nsource\tstatus\tbytes\tcksum\tfile\n' \
+printf 'mazda-cmu-report\t3\nbuild\t%s\nsource\tstatus\tbytes\tcksum\tfile\n' \
     "$REPORT_BUILD_ID" >"$MANIFEST" 2>/dev/null || exit 74
 
 record_status() {
@@ -332,17 +343,15 @@ capture_file sys/class/graphics/fb0/modes framebuffer-modes.txt
 capture_file sys/class/drm/card0/device/uevent drm-device.txt
 capture_network_module_files
 
-printf 'result\tcomplete\n' >>"$MANIFEST" 2>/dev/null || exit 74
-SYNC_MARKER_PART="$REPORT/.sync-complete.part"
-SYNC_MARKER="$REPORT/sync-complete"
-printf '%s\n' "$REPORT_BUILD_ID" >"$SYNC_MARKER_PART" 2>/dev/null || exit 74
+printf 'integrity\tcomplete\n' >>"$MANIFEST" 2>/dev/null || exit 74
+FLUSH_MARKER_PART="$REPORT/.flush-complete.part"
+FLUSH_MARKER="$REPORT/flush-complete"
+printf 'flush\tcomplete\nbuild\t%s\n' "$REPORT_BUILD_ID" \
+    >"$FLUSH_MARKER_PART" 2>/dev/null || exit 74
 
-if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" != "1" ]; then
-    [ -x /bin/sync ] || exit 75
-    /bin/sync >/dev/null 2>&1 || exit 75
-fi
-mv "$SYNC_MARKER_PART" "$SYNC_MARKER" 2>/dev/null || exit 74
-if [ "${MAZDA_CMU_INSPECT_TESTING:-0}" != "1" ]; then
-    /bin/sync >/dev/null 2>&1 || exit 75
-fi
+flush_filesystems || exit 75
+flush_filesystems || exit 75
+# Publish the receipt only after both flushes succeed. This rename is the last report mutation, so
+# an interruption or failure before it can leave only a non-acceptable hidden candidate.
+mv "$FLUSH_MARKER_PART" "$FLUSH_MARKER" 2>/dev/null || exit 74
 exit 0

@@ -77,7 +77,7 @@ mod tests {
         let media = mazda.media_state();
 
         assert_eq!(vehicle.gear, Gear::Park);
-        assert!(vehicle.speed.get().abs() < f32::EPSILON);
+        assert_eq!(vehicle.speed.get(), Some(0.0));
         assert_eq!(media.playback, PlaybackState::Playing);
     }
 

@@ -44,3 +44,8 @@ The firmware-gated collector in `apps/cmu-inspect` covers part of this first pas
 published v74 update-scanner command injection to run a fixed shell payload and therefore is not a
 passive USB read. Follow [`CMU_USB_INSPECTION.md`](CMU_USB_INSPECTION.md) and preserve its stricter
 firmware, removable-media, and application-processor-only boundaries.
+
+The update scanner begins root execution before the collector's firmware gate can run. Treat the
+gate as a collection-scope check, not as containment for the launcher or protection for an
+off-target CMU. Use the collector only on a spare, physically isolated bench unit and never while
+the CMU is connected to a vehicle.

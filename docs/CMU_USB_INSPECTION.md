@@ -1,6 +1,6 @@
 # Car-specific CMU USB inspection
 
-`mazda-cmu-inspect` prepares a report-only USB payload for one target:
+`mazda-cmu-inspect` prepares a **bench-only**, report-only USB payload for one target identity:
 
 - 2019.5 Mazda CX-5 GT;
 - About-screen version `70.00.100 NA N`;
@@ -14,6 +14,12 @@ collector cannot verify them without querying vehicle-side services, which are i
 scope. Once launched, it independently requires the complete published raw version, patch, flavor,
 and software part fields before creating a report. Prefixes are not discarded or normalized for
 the gate.
+
+The gate does not make the entry mechanism safe for an installed or off-target CMU. The stock
+update scanner interprets the launcher filename and starts the collector with root privileges
+*before* the collector can read or reject `/jci/version.ini`. The human target confirmation and the
+internal gate constrain preparation and collection respectively; neither validates nor contains
+that prior privileged entry. Do not insert this media into a CMU connected to a vehicle.
 
 The final `N` on the screen is the navigation protocol marker. It is not the firmware patch. The
 patch is the `A` in Mazda's package identity `cmu150_NA_70.00.100A`. Mazda's North American service
@@ -42,8 +48,9 @@ The drive uses the update-filename command injection documented by Zero Day Init
 but its published test target was not `70.00.100A`. The stock v70 update pipeline and exact package
 identity are established; this particular filename trigger on this particular v70 build remains a
 hardware-validation assumption. The first insertion is therefore both the collection attempt and a
-bounded compatibility test. Do not describe the v70 entry path as confirmed until the exact car
-returns a valid report.
+bounded compatibility test, and it belongs only on a spare CMU with vehicle buses physically
+disconnected on the bench. Do not describe the v70 entry path as confirmed until an exact-build
+bench CMU returns a valid report.
 
 The USB root contains exactly:
 
@@ -92,7 +99,7 @@ inert staging name, and the active `.up` name is created only by the final atomi
 preparation failure, cleanup removes all payload and matching AppleDouble names and re-lists the
 volume. The ordinary preparation error is returned only if that cleanup is verified. Otherwise the
 tool emits: **“Media may contain an active launcher; do not insert it into the vehicle. Reformat the
-entire device.”** Treat that warning literally; do not inspect the suspect drive in the car.
+entire device.”** Treat that warning literally; do not insert the suspect drive into any CMU.
 
 Run:
 
@@ -108,26 +115,27 @@ the supplied photo. The generated launcher has no selectable mount. ZDI's single
 Inspect the drive root, eject it normally, and do not rename the unusual `.up` filename. Do not use
 a drive containing `._*`, `.DS_Store`, a firmware package, installer, tweak, or another `.up` file.
 
-## First run in the target car
+## First run on an isolated bench CMU
 
-This is not yet validated on the exact hardware. Keep the first attempt controlled:
+This is not authorized for an installed CMU. Follow [`BENCH_SETUP.md`](BENCH_SETUP.md), verify the
+pinout for the exact spare unit, and keep the first attempt controlled:
 
-1. Park outdoors or in a safely ventilated place, apply the parking brake, and do not drive during
-   the attempt.
-2. Confirm `70.00.100 NA N` on the About screen again.
-3. Use accessory mode with a healthy battery. If a proper vehicle-compatible battery maintainer is
-   already available and understood, use it according to its instructions.
-4. Remove the navigation SD card and disconnect every other USB device. Do not connect diagnostic,
-   OBD, serial, CAN, or LIN hardware.
-5. After the stock HMI has fully booted, insert only the prepared drive into the armrest smartphone
-   USB port used for Android Auto/CarPlay.
-6. Leave the vehicle stationary and allow scanner activity to settle. Do not remove the drive while
-   it is active. Then shut accessory power down normally, wait for the CMU to turn off, and remove
-   the drive.
+1. Use a spare CMU and display physically outside the vehicle. Connect only fused, current-limited
+   bench power, ACC, ground, the display, and an already verified passive UART monitor if needed.
+2. Leave every vehicle, diagnostic, OBD, CAN, LIN, Ethernet, and USB-network connection physically
+   absent. The bench setup must have no electrical connection to a vehicle.
+3. Confirm the spare unit's part identity and `70.00.100 NA N` display version before inserting the
+   drive. Do not rely on the post-entry firmware gate to protect a different unit.
+4. Remove the navigation SD card and every other USB device. After the stock HMI has fully booted,
+   insert only the prepared mass-storage drive into the normal smartphone USB port.
+5. Watch supply current, display output, and UART output without sending commands. On abnormal
+   current or behavior, cut bench power and stop.
+6. Allow scanner activity to settle, shut bench power down normally, wait for the CMU to turn off,
+   and only then remove the drive.
 
-The installed CMU remains physically connected to the car's normal internal networks. This project
-does not claim otherwise. The narrower guarantee is that neither the launcher nor collector names,
-opens, queries, or writes VIP, CAN, or LIN interfaces.
+The narrower software guarantee remains that neither the launcher nor collector names, opens,
+queries, or writes VIP, CAN, or LIN interfaces. Physical bench isolation supplies the containment
+that the post-entry firmware gate cannot.
 
 If no `mazda-cmu-report` directory appears, the v70 trigger may not work or the fixed mount may not
 match. Stop. Do not add a second launcher, cycle through mounts, open the diagnostic update menu, or
@@ -147,16 +155,26 @@ unsupported-identity exit or report creation.
 
 A completed report has:
 
-- `manifest.tsv` using schema 2 and build ID
-  `mazda-cmu-inspect-70.00.100-na-report-v1`;
+- `manifest.tsv` using schema 3 and build ID
+  `mazda-cmu-inspect-70.00.100-na-report-v2`;
 - exactly one row for every expected source, in fixed order;
 - the byte length, POSIX `cksum`, and exact output filename for each successful capture;
-- a final `result<TAB>complete` record;
-- `sync-complete`, created between two successful stock `/bin/sync` calls, with no subsequent
-  report writes.
+- a final `integrity<TAB>complete` record, which closes the manifest but does not claim successful
+  flushing or process completion;
+- `flush-complete`, containing an explicit flush receipt and matching build ID.
 
-The separate completion marker distinguishes a fully flushed run from a manifest that was merely
-written. POSIX `cksum` detects accidental truncation or corruption; it is not a cryptographic
+The collector writes the manifest integrity record and a hidden candidate receipt, then performs
+both stock `/bin/sync` calls while that receipt is still non-acceptable. Only after both calls return
+success does it atomically rename the candidate to `flush-complete`; that rename is the last report
+mutation. If either flush fails or execution stops before the rename, no acceptable marker exists
+and the hidden candidate may remain. The analyzer requires both the integrity record and the flush
+receipt, so it rejects that state without relying on cleanup.
+
+`flush-complete` certifies that both pre-publication flush calls returned success; it does not and
+cannot prove the collector process subsequently returned status 0. Because the receipt is published
+after the flushes and is not followed by another collector write or flush, interruption can lose the
+receipt and cause a safe false negative. Follow the normal bench shutdown procedure before removing
+the drive. POSIX `cksum` detects accidental truncation or corruption; it is not a cryptographic
 authenticity claim.
 
 The report covers CMU and kernel versions; CPU and memory information; mounts and partitions;
@@ -196,9 +214,15 @@ production `/bin/busybox` applet calls, both `/bin/sync` calls, the exact launch
 BusyBox `ash`, and a command that is genuinely killed by `timeout -t 1 -s KILL`. Host-shell tests
 remain separate.
 
+Host-shell CI also injects a failure on the second flush and verifies that the collector returns 75,
+never publishes `flush-complete`, and leaves a report the analyzer rejects even though the hidden
+candidate remains.
+
 The v70 update-scanner trigger itself is explicitly **hardware-unvalidated**. CI does not emulate
 the stock Mazda scanner, FAT filename handling, USB enumeration, or root execution on
-`70.00.100 NA N`; only a report returned by the owner's exact CMU can validate that boundary.
+`70.00.100 NA N`; only a report returned by an exact-build, physically isolated bench CMU can
+validate that boundary. A bench result does not authorize repeating the exploit on an installed
+vehicle.
 
 ## Remote transport remains disabled
 
@@ -209,9 +233,10 @@ or write stock logs.
 
 Do not insert networking hardware, load a module, change an interface, start a server, install an
 authorized key, or connect the CMU to another network based on this unvalidated build. Any later
-transport must be separately designed and reviewed after a genuine report from this exact car. A
-later shell would require a separate explicit feature with key-only authentication, a dedicated
-isolated interface, no persistence, and deterministic teardown.
+transport must be separately designed and reviewed after a genuine report from an exact-build
+bench CMU. Its first probe must also remain on the isolated bench. A later shell would require a
+separate explicit feature with key-only authentication, a dedicated isolated interface, no
+persistence, and deterministic teardown.
 
 ## Stop conditions
 
@@ -221,8 +246,9 @@ Stop without working around the condition if:
 - the internal version, patch, NA flavor, or software part gate refuses the run;
 - the prepared drive is not scanned automatically or no report appears;
 - any firmware update or installation screen appears;
-- either `result<TAB>complete` or `sync-complete` is missing;
+- either `integrity<TAB>complete` or `flush-complete` is missing;
 - any capture reports `timeout` or `io_error`;
 - the display, camera, audio, power behavior, or stock HMI becomes abnormal;
 - continuing would require a firmware package, alternate mount, persistence, remount, reboot,
-  watchdog change, VIP command, vehicle-bus access, networking change, or another exploit.
+  watchdog change, VIP command, vehicle-bus access, networking change, another exploit, or an
+  installed-vehicle attempt.

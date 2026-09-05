@@ -11,7 +11,7 @@ use mazda_cmu_inspect::{
 
 fn usage() {
     eprintln!(
-        "Usage:\n  mazda-cmu-inspect prepare-usb --target {TARGET_CONFIRMATION} /Volumes/<drive>\n  mazda-cmu-inspect analyze-report /Volumes/<drive>/mazda-cmu-report\n\nTarget: 2019.5 Mazda CX-5 GT with display version {TARGET_DISPLAY_VERSION}"
+        "Usage:\n  mazda-cmu-inspect prepare-usb --target {TARGET_CONFIRMATION} /Volumes/<drive>\n  mazda-cmu-inspect analyze-report /Volumes/<drive>/mazda-cmu-report\n\nBench-only target identity: 2019.5 Mazda CX-5 GT with display version {TARGET_DISPLAY_VERSION}"
     );
 }
 
@@ -44,6 +44,9 @@ fn main() -> ExitCode {
 
     println!(
         "Prepared report-only CMU payload for 2019.5 CX-5 GT / {TARGET_DISPLAY_VERSION} at {destination}"
+    );
+    println!(
+        "BENCH ONLY: do not insert this media into an installed vehicle; the firmware gate runs after privileged entry."
     );
     ExitCode::SUCCESS
 }

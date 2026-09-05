@@ -24,7 +24,7 @@ The project is desktop-first and deliberately **not** a vehicle-control project.
 
 Application code does not receive raw CAN/LIN access, D-Bus connections, VIP flashing, low-level device access, arbitrary shell execution, or arbitrary filesystem writes. Powertrain, braking, steering, restraints, ADAS, and other safety-critical systems are out of scope.
 
-The first CMU integration is observational. Any future mutating infotainment operation must be individually understood and isolated from vehicle-control buses.
+The first CMU integration is observational and bench-only. Any future mutating infotainment operation must be individually understood and isolated from vehicle-control buses.
 
 ## Repository layout
 
@@ -71,6 +71,10 @@ The first inspection utility is hard-coded for the owner's 2019.5 CX-5 GT on scr
 `70.00.100 NA N`. It prepares a firmware-gated, report-only USB payload; it is not a general Mazda
 tool. A passive Mac-to-CMU cable is not supported because both ports are USB hosts. Read
 [`docs/CMU_USB_INSPECTION.md`](docs/CMU_USB_INSPECTION.md) before preparing or inserting media.
+
+The firmware check happens only after the stock update scanner has begun privileged execution, so
+it cannot contain the entry path. Prepared media is for a spare, physically isolated bench CMU
+only; do not insert it into an installed vehicle.
 
 No persistence, networking, remote shell, VIP access, CAN access, or LIN access is implemented.
 Bench work remains preferred for later mutating features; see [`docs/BENCH_SETUP.md`](docs/BENCH_SETUP.md).
